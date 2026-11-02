@@ -610,7 +610,12 @@ class Dispatcher:
             snr_val = 0.0
         for cb in self._raw_rx_subscribers:
             try:
-                await invoke_maybe_awaitable(cb, data, rssi_val, snr_val)
+                if _names_keyword(cb, "rx_radio_id"):
+                    await invoke_maybe_awaitable(
+                        lambda: cb(data, rssi_val, snr_val, rx_radio_id=rx_radio_id)
+                    )
+                else:
+                    await invoke_maybe_awaitable(cb, data, rssi_val, snr_val)
             except Exception as e:
                 self._log(f"Raw RX subscriber error: {e}")
 
