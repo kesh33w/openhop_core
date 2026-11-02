@@ -1339,14 +1339,11 @@ class Dispatcher:
             # available; fall back to the legacy single-arg send(raw).
             send_fn = self.radio.send
             pass_rx = rx_radio_id is not None and _names_keyword(send_fn, "rx_radio_id")
-            if radio_id is not None:
-                try:
-                    if pass_rx:
-                        tx_metadata = await send_fn(raw, radio_id=radio_id, rx_radio_id=rx_radio_id)
-                    else:
-                        tx_metadata = await send_fn(raw, radio_id=radio_id)
-                except TypeError:
-                    tx_metadata = await send_fn(raw)
+            if radio_id is not None and _names_keyword(send_fn, "radio_id"):
+                if pass_rx:
+                    tx_metadata = await send_fn(raw, radio_id=radio_id, rx_radio_id=rx_radio_id)
+                else:
+                    tx_metadata = await send_fn(raw, radio_id=radio_id)
             elif pass_rx:
                 tx_metadata = await send_fn(raw, rx_radio_id=rx_radio_id)
             else:
@@ -1354,9 +1351,17 @@ class Dispatcher:
         except Exception as e:
             radio_label = f" radio={tx_radio_id}" if tx_radio_id else ""
             self._log(f"Radio transmit error{radio_label}: {e}")
+            packet._tx_metadata = {"radio_id": tx_radio_id, "tx_outcome_uncertain": True}
             self.state = DispatcherState.IDLE
             return (False, None, None)
-        if tx_metadata is None:
+        if tx_metadata is None or tx_metadata is False or (
+            isinstance(tx_metadata, dict) and tx_metadata.get("ok") is False
+        ):
+            packet._tx_metadata = {
+                "radio_id": tx_radio_id,
+                "tx_outcome_uncertain": tx_metadata is None,
+                **(tx_metadata if isinstance(tx_metadata, dict) else {}),
+            }
             radio_label = f" radio={tx_radio_id}" if tx_radio_id else ""
             self._log(f"Radio transmit returned no confirmation metadata{radio_label}")
             self.state = DispatcherState.IDLE
