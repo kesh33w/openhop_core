@@ -251,8 +251,8 @@ class _RxEventsMixin:
             is_channel=True,
             channel_idx=channel_idx,
             path_len=path_len,
-            snr=snr if snr is not None else 0.0,
-            rssi=rssi if rssi is not None else 0,
+            snr=snr,
+            rssi=rssi,
         )
         was_queued = self.message_queue.push(msg)
 

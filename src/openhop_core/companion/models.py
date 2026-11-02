@@ -241,8 +241,8 @@ class QueuedMessage:
     is_channel: bool = False
     channel_idx: int = 0  # only meaningful if is_channel
     path_len: int = 0
-    snr: float = 0.0
-    rssi: int = 0
+    snr: Optional[float] = 0.0
+    rssi: Optional[int] = 0
     channel_data_type: int = 0
     channel_data_payload: bytes = b""
     # 4-byte author pubkey prefix for TXT_TYPE_SIGNED_PLAIN (room server posts);

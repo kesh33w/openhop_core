@@ -470,7 +470,8 @@ class _MessagingCommandsMixin:
 
     def _build_message_frame(self, msg: "QueuedMessage") -> bytes:
         """Encode a QueuedMessage into a response frame (shared by base and subclasses)."""
-        snr_byte = max(-128, min(127, int(round(getattr(msg, "snr", 0) * 4))))
+        snr = getattr(msg, "snr", 0)
+        snr_byte = max(-128, min(127, int(round((snr if snr is not None else 0) * 4))))
         if snr_byte < 0:
             snr_byte += 256
         if msg.is_channel:
@@ -495,7 +496,9 @@ class _MessagingCommandsMixin:
                 )
             txt_type = 0
             text_bytes = (msg.text or "").rstrip("\x00").encode("utf-8", errors="replace")
-            if self._app_target_ver >= 3:
+            # The supported legacy channel frame omits signal measurements.
+            # A translated/local observation has no SNR; do not encode fake 0 dB.
+            if self._app_target_ver >= 3 and snr is not None:
                 head = bytes(
                     [
                         RESP_CODE_CHANNEL_MSG_RECV_V3,
