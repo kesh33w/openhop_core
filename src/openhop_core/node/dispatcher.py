@@ -1359,12 +1359,18 @@ class Dispatcher:
             packet._tx_metadata = {"radio_id": tx_radio_id, "tx_outcome_uncertain": True}
             self.state = DispatcherState.IDLE
             return (False, None, None)
-        if tx_metadata is None or tx_metadata is False or (
-            isinstance(tx_metadata, dict) and tx_metadata.get("ok") is False
+        unsupported_outcome = (
+            tx_metadata is not True
+            and tx_metadata is not False
+            and not isinstance(tx_metadata, dict)
+        )
+        if unsupported_outcome or tx_metadata is False or (
+            isinstance(tx_metadata, dict)
+            and (tx_metadata.get("ok") is False or tx_metadata.get("tx_outcome_uncertain"))
         ):
             packet._tx_metadata = {
                 "radio_id": tx_radio_id,
-                "tx_outcome_uncertain": tx_metadata is None,
+                "tx_outcome_uncertain": unsupported_outcome,
                 **(tx_metadata if isinstance(tx_metadata, dict) else {}),
             }
             radio_label = f" radio={tx_radio_id}" if tx_radio_id else ""
