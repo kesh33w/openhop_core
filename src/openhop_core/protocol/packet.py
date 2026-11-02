@@ -112,6 +112,8 @@ class Packet:
         "_snr",
         "_rssi",
         "_rx_radio_id",
+        "_private_peer",
+        "_private_peer_deadline",
         "_do_not_retransmit",
         "drop_reason",
         "_tx_metadata",
@@ -142,6 +144,8 @@ class Packet:
         self._snr = 0
         self._rssi = 0
         self._rx_radio_id = None
+        self._private_peer = False
+        self._private_peer_deadline = None
         # Repeater flag to prevent retransmission and log drop reason
         self._do_not_retransmit = False
         self.drop_reason = None  # Optional: reason for dropping packet
@@ -484,6 +488,9 @@ class Packet:
         self._recv_region_unscoped = False
         self._flood_scope_applied = False
         self._path_hash_mode_applied = False
+
+        self._private_peer = False
+        self._private_peer_deadline = None
 
         idx, data_len = 0, len(data)
         self.header = data[idx]
