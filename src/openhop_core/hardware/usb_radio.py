@@ -29,6 +29,7 @@ Usage:
 """
 
 import asyncio
+import inspect
 import logging
 import os
 import random
@@ -82,6 +83,20 @@ from .protocol_constants import (
 )
 
 logger = logging.getLogger("USBLoRaRadio")
+
+
+def _deliver_rx_packet(callback: Callable[..., None], data: bytes, rssi: int, snr: float):
+    """Deliver captured metrics when supported, preserving data-only callbacks.
+
+    Check argument binding before invoking: a TypeError from inside a callback
+    must not trigger a second delivery. Opaque callbacks retain the legacy API.
+    """
+    try:
+        inspect.signature(callback).bind(data, rssi, snr)
+    except (TypeError, ValueError):
+        callback(data)
+    else:
+        callback(data, rssi, snr)
 
 
 # Import LoRaRadio base conditionally — allows standalone testing
@@ -169,7 +184,7 @@ class USBLoRaRadio(_RadioBase):
         self._noise_floor: float = -99.0
 
         # RX callback — set by Dispatcher via set_rx_callback()
-        self.rx_callback: Optional[Callable[[bytes], None]] = None
+        self.rx_callback: Optional[Callable[..., None]] = None
 
         # Response synchronization (command → response matching)
         self._response_events: dict[int, asyncio.Event] = {}
@@ -425,8 +440,8 @@ class USBLoRaRadio(_RadioBase):
         """Set the event loop used for callbacks and live configuration pushes."""
         self._event_loop = loop
 
-    def set_rx_callback(self, callback: Callable[[bytes], None]):
-        """Set RX callback — called by Dispatcher to register _on_packet_received."""
+    def set_rx_callback(self, callback: Optional[Callable[..., None]]):
+        """Set a ``(data, rssi, snr)`` or legacy ``(data)`` callback; None clears it."""
         self.rx_callback = callback
         logger.info("RX callback registered")
 
@@ -1075,8 +1090,9 @@ class USBLoRaRadio(_RadioBase):
             signal_rssi = struct.unpack("<h", payload[4:6])[0]
             lora_data = payload[6:]
 
+            snr = snr_x10 / 10.0
             self.last_rssi = rssi
-            self.last_snr = snr_x10 / 10.0
+            self.last_snr = snr
             self.last_signal_rssi = signal_rssi
             self._rx_count += 1
 
@@ -1086,9 +1102,14 @@ class USBLoRaRadio(_RadioBase):
             # pymc_core dispatcher._on_packet_received calls asyncio.get_running_loop()
             # inside the callback; if we invoke it from this worker thread, it raises
             # RuntimeError and the packet is silently dropped (dispatcher.py:306-308).
-            if self.rx_callback:
+            # Capture callback and frame metrics together. The reader may update
+            # last_rssi/last_snr again before this callback (or its tasks) runs.
+            callback = self.rx_callback
+            if callback:
                 if self._event_loop and self._event_loop.is_running():
-                    self._event_loop.call_soon_threadsafe(self.rx_callback, lora_data)
+                    self._event_loop.call_soon_threadsafe(
+                        _deliver_rx_packet, callback, lora_data, rssi, snr
+                    )
                 else:
                     logger.warning("RX packet but event loop not running — dropping")
             else:
