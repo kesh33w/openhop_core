@@ -1,182 +1,53 @@
-# openHop Core
+# Kesh's OpenHop Core bridge fork
 
-[![Documentation](https://img.shields.io/badge/docs-docs.openhop.dev-blue)](https://docs.openhop.dev/projects/openhop-core/)
-[![PyPI](https://img.shields.io/pypi/v/openhop-core)](https://pypi.org/project/openhop-core/)
-[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+This is Kesh's fork of [OpenHop Core](https://github.com/openhop-dev/openhop_core), the Python MeshCore protocol and radio library. The `kesh/bridge` branch supplies radio handling for [Kesh's OpenHop bridge](https://github.com/kesh33w/kesh-openhop-bridge), a Raspberry Pi repeater with two radios on different frequencies.
 
-**openHop Core** is a Python reimplementation of [MeshCore](https://github.com/meshcore-dev/meshcore) — a lightweight, portable C++ library for multi-hop packet routing using LoRa radios. Designed for **Raspberry Pi** and similar hardware, openHop Core communicates with LoRa modules over **SPI**.
+Core provides the radio and packet interfaces. The [Repeater fork](https://github.com/kesh33w/openhop_repeater/tree/kesh/bridge) implements channel translation, routing policy and queues. The hub contains the optional iLink sidecar and enrollment service.
 
-> openHop Core is under active development. It's compatible with the original MeshCore protocol, but not yet as optimized or elegant as its C++ counterpart.
+## Changes used by the bridge
 
-## Documentation
+- The [RF fabric](src/openhop_core/rf_fabric) records the receiving radio and supports sends through a named radio. The dispatcher still handles packet deduplication across radios.
+- The [dispatcher](src/openhop_core/node/dispatcher.py) passes receive-radio metadata to compatible raw-packet subscribers and packet handlers.
+- Send results distinguish a failed transmission from an uncertain outcome. An internal driver error does not trigger a second send through the default radio.
+- The [USB driver](src/openhop_core/hardware/usb_radio.py) captures each packet's RSSI and SNR before handing it to the event loop. A later packet cannot overwrite the earlier packet's signal readings. Status getters still report the most recent reception.
 
-**Complete documentation is available at [docs.openhop.dev](https://docs.openhop.dev/projects/openhop-core/).**
+A successful modem transmission does not establish recipient delivery. The library also does not make cross-channel translation end-to-end encrypted. The Repeater must decrypt an eligible group message with its source key and encrypt a new copy with its destination key.
 
-### Quick Links
-- [Node Usage Guide](https://docs.openhop.dev/projects/openhop-core/node-usage/) - Guide for using MeshNode
-- [Examples](https://docs.openhop.dev/projects/openhop-core/examples/) - Working code examples
-- [API Reference](https://docs.openhop.dev/projects/openhop-core/api-reference/) - Detailed API documentation
-- [openHop Frame extensions](docs/openhop-frame-extensions.md) - Companion frames that are openHop-specific, not MeshCore
+## Use matching source
 
-## Quick Start
+For the full bridge, follow the hub's [reconstruction workflow](https://github.com/kesh33w/kesh-openhop-bridge#reconstruct-and-test). Select `components.current.json` explicitly. That manifest records a dated source snapshot, not necessarily the latest branch tips or the software installed on a Pi.
 
-### Installation
+To work on this Core branch alone:
 
-> **Important**: On modern Python installations (Ubuntu 22.04+, Debian 12+), you may encounter `externally-managed-environment` errors when installing packages system-wide. Create a virtual environment first:
->
-> ```bash
-> # Create virtual environment
-> python3 -m venv openhop_env
->
-> # Activate virtual environment
-> # On Linux/Mac:
-> source openhop_env/bin/activate
-> # On Windows:
-> openhop_env\Scripts\activate
-> ```
-
-```bash
-# Install from PyPI
-pip install openhop-core
-
-# For hardware support (SX1262 radios)
-pip install openhop-core[hardware]
-
-# Install all dependencies
-pip install openhop-core[all]
-```
-
-### Basic Usage
-
-```python
-import asyncio
-from openhop_core import MeshNode, LocalIdentity
-from openhop_core.hardware.sx1262_wrapper import SX1262Radio
-
-async def main():
-    # Create radio (Waveshare HAT example)
-    radio = SX1262Radio(
-        bus_id=0, cs_pin=21, reset_pin=18,
-        busy_pin=20, irq_pin=16, txen_pin=6,
-        frequency=869525000, tx_power=22
-    )
-    radio.begin()
-
-    # Create mesh node
-    identity = LocalIdentity()
-    node = MeshNode(radio=radio, local_identity=identity)
-    await node.start()
-
-    print("Mesh node started!")
-
-asyncio.run(main())
-```
-
-For examples, see the [documentation](https://docs.openhop.dev/projects/openhop-core/examples/).
-
-## Hardware Support
-
-### Supported Radios
-- **Waveshare SX1262 LoRaWAN/GNSS HAT** - Popular Raspberry Pi LoRa module
-- **HackerGadgets uConsole** - All-in-one extension board with LoRa support
-- **FrequencyLabs meshadv-mini** - Raspberry Pi hat with E22-900M22S LoRa module
-
-### Requirements
-- Raspberry Pi (or compatible SBC)
-- SX1262 LoRa module
-- SPI interface enabled
-- Python 3.10+
-
-## What is MeshCore?
-
-MeshCore enables **long-range, decentralized communication** using **multi-hop packet routing**. Devices (nodes) forward packets through neighboring nodes to reach distant ones — no central infrastructure required.
-
-It occupies a middle ground between:
-
-| Project | Focus |
-|---------|-------|
-| [Meshtastic](https://meshtastic.org/) | Casual LoRa messaging |
-| [Reticulum](https://reticulum.network/) | Full encrypted networking stack |
-
-### Use Cases
-- Off-grid and emergency communication
-- Tactical or field mesh deployments
-- IoT mesh networks
-- Remote monitoring systems
-
-## Architecture
-
-```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Application   │    │   MeshNode      │    │   Hardware      │
-│                 │    │                 │    │                 │
-│ • Text Messages │◄──►│ • Packet Routing│◄──►│ • SX1262 Radio  │
-│ • Advertisements│    │ • Identity Mgmt │    │ • SPI Interface │
-│ • Telemetry     │    │ • Event Service │    │ • GPIO Control  │
-│ • Group Channels│    │ • Repeater Mgmt │    │                 │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-```
-
-## Security
-
-- **Ed25519/X25519 cryptographic identities**
-- **End-to-end encryption** for messages
-- **CRC validation** for data integrity
-- **Secure key exchange** protocols
-
-## Project Structure
-
-```
-openHop Core/
-├── src/openhop_core/          # Main package
-│   ├── hardware/           # Radio hardware interfaces
-│   ├── node/               # MeshNode implementation
-│   ├── protocol/           # Packet protocols
-│   └── events/             # Event handling
-├── examples/               # Working examples
-│   ├── common.py           # Shared utilities
-│   ├── send_flood_advert.py
-│   ├── send_direct_advert.py
-│   └── ...
-├── .github/workflows/      # GitHub Actions
-│   └── publish-pypi.yml    # Package test and publication pipeline
-└── tests/                  # Unit tests
-```
-
-## Contributing
-
-Contributions are welcome! Please see our [contributing guide](https://docs.openhop.dev/projects/openhop-core/development/) for details.
-
-### Development Setup
-
-```bash
-# Clone the repository
-git clone https://github.com/openhop-dev/openhop_core.git
+```sh
+git clone --branch kesh/bridge --single-branch https://github.com/kesh33w/openhop_core.git
 cd openhop_core
-
-# Install development dependencies
-pip install -e .[dev]
+python3 -m venv .venv
+.venv/bin/python -m pip install -e '.[test]'
+.venv/bin/python -m pytest --tb=short
 ```
 
+The package requires Python 3.10 or later. The hub's recorded integration environment uses Python 3.14. These commands install this checkout in a virtual environment; `pip install openhop-core` installs the upstream package instead.
 
+The `radio` extra adds serial support. The `hardware` extra adds SPI, GPIO and USB dependencies, some of which are platform-specific. Install only the extras required by your hardware. Running unit tests does not require a connected radio.
 
-## License
+## Source and tests
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+| Path | Purpose |
+| --- | --- |
+| [src/openhop_core/rf_fabric](src/openhop_core/rf_fabric) | Multi-radio receive observations and transmit selection |
+| [src/openhop_core/hardware](src/openhop_core/hardware) | SPI, USB and network radio drivers |
+| [src/openhop_core/node](src/openhop_core/node) | Mesh node, dispatcher and handlers |
+| [src/openhop_core/protocol](src/openhop_core/protocol) | Packet encoding and protocol definitions |
+| [tests/test_usb_rx_metrics.py](tests/test_usb_rx_metrics.py) | Per-packet USB signal readings and callback compatibility |
+| [tests/test_dispatcher_tx_outcome.py](tests/test_dispatcher_tx_outcome.py) | Failed and uncertain sends |
+| [tests/test_dispatcher_raw_rx_radio.py](tests/test_dispatcher_raw_rx_radio.py) | Receive-radio metadata for raw subscribers |
+| [docs/openhop-frame-extensions.md](docs/openhop-frame-extensions.md) | OpenHop-specific companion frames |
 
-## Acknowledgments
+The [examples](examples) exercise the library directly. Review their radio settings and host requirements before running them on hardware. Unit-test results do not establish RF range, regulatory compliance or field reliability.
 
-- Original [MeshCore](https://github.com/meshcore-dev/meshcore) C++ implementation
-- Waveshare and HackerGadgets for hardware support
+## Upstream and license
 
-## Support
+OpenHop Core supplies the underlying Python implementation. [MeshCore](https://github.com/meshcore-dev/MeshCore) supplies the original C++ protocol implementation. The [upstream documentation](https://docs.openhop.dev/projects/openhop-core/) covers general library use, but does not describe all changes on this branch.
 
-- [Documentation](https://docs.openhop.dev/projects/openhop-core/)
-- [Issues](https://github.com/openhop-dev/openhop_core/issues)
-- [Discussions](https://github.com/openhop-dev/openhop_core/discussions)
-- [pyMC Discord](https://discord.gg/3s8MMaSTzq)
-- [Meshcore Discord](https://meshcore.gg/)
-
----
-
-*Built with ❤️ for mesh networking enthusiasts*</content>
+The original copyright notices and [MIT License](LICENSE) remain unchanged. Report fork-specific problems in [this repository](https://github.com/kesh33w/openhop_core/issues), with the commit, radio backend and steps to reproduce. Keep channel keys and device credentials out of reports.
