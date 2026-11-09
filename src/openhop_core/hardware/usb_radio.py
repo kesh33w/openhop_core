@@ -292,7 +292,8 @@ class USBLoRaRadio(_RadioBase):
                 "lbt_backoff_delays_ms": list[int],
                 "lbt_channel_busy": bool,
             }
-        Returns None on failure.
+        Returns a dict with ok=False for a definitive busy-channel refusal.
+        Returns None when the transmission outcome is unknown.
         """
         if not self._initialized:
             logger.error("Radio not initialized")
@@ -416,7 +417,16 @@ class USBLoRaRadio(_RadioBase):
                         "lbt_channel_busy": len(lbt_backoff_delays) > 0,
                     }
                 else:
-                    logger.error("[TX] Failed - no TX_DONE response")
+                    # ERR_CHANNEL_BUSY is a definitive refusal, not a lost
+                    # TX_DONE. Keep that distinction after restoring RX (which
+                    # can overwrite _last_modem_error), so the caller may use
+                    # its bounded known-unsent retry without replaying an
+                    # uncertain transmission.
+                    definitely_unsent = outcome == "refused"
+                    if definitely_unsent:
+                        logger.warning("[TX] Not sent - modem refused busy channel")
+                    else:
+                        logger.error("[TX] Failed - no TX_DONE response")
                     # Try to restore RX anyway
                     await self._send_command(
                         CMD_RX_START,
@@ -424,6 +434,16 @@ class USBLoRaRadio(_RadioBase):
                         expect_cmd=CMD_RX_STARTED,
                         timeout=2.0,
                     )
+                    if definitely_unsent:
+                        return {
+                            "ok": False,
+                            "tx_outcome_uncertain": False,
+                            "reason": "channel_busy",
+                            "airtime_ms": 0.0,
+                            "lbt_attempts": len(lbt_backoff_delays),
+                            "lbt_backoff_delays_ms": lbt_backoff_delays,
+                            "lbt_channel_busy": True,
+                        }
                     return None
 
             except Exception as e:

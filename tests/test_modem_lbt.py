@@ -214,7 +214,10 @@ async def test_usb_modem_busy_for_whole_budget_fails_without_forcing():
     result = await radio.send(b"payload")
     elapsed = time.monotonic() - started
 
-    assert result is None
+    assert result["ok"] is False
+    assert result["tx_outcome_uncertain"] is False
+    assert result["reason"] == "channel_busy"
+    assert result["airtime_ms"] == 0.0
     assert 0.4 <= elapsed <= 2.0  # bounded by the budget, not the 1000 refusals
     assert 2 < calls["tx"] < 100
 
@@ -254,3 +257,78 @@ def test_lbt_knob_clamps_and_defaults():
         # Matches MeshCore: getCADFailMaxDuration() 4 s, 200 ms retry.
         assert radio.lbt_max_wait_seconds == 4.0
         assert radio.lbt_retry_interval_ms == 200
+
+
+async def test_tcp_modem_busy_for_whole_budget_is_definitively_unsent():
+    radio = _tcp_radio(lbt_enabled=False)
+    calls = _script_modem(radio, [ERR_CHANNEL_BUSY] * 1000)
+    result = await radio.send(b"payload")
+    assert result["ok"] is False
+    assert result["tx_outcome_uncertain"] is False
+    assert result["reason"] == "channel_busy"
+    assert result["airtime_ms"] == 0.0
+    assert 2 < calls["tx"] < 100
+    assert CMD_RX_START in calls["other"]
+
+
+async def test_usb_and_tcp_missing_tx_done_remains_uncertain():
+    for factory in (_usb_radio, _tcp_radio):
+        radio = factory(lbt_enabled=False)
+        calls = _script_modem(radio, [None])
+        assert await radio.send(b"payload") is None
+        assert calls["tx"] == 1
+
+
+async def test_usb_and_tcp_final_timeout_after_busy_is_not_safe_to_retry():
+    for factory in (_usb_radio, _tcp_radio):
+        radio = factory(lbt_enabled=False)
+        calls = _script_modem(radio, [ERR_CHANNEL_BUSY, None])
+        assert await radio.send(b"payload") is None
+        assert calls["tx"] == 2
+
+
+async def test_busy_result_survives_rx_recovery_clearing_modem_error():
+    for factory in (_usb_radio, _tcp_radio):
+        radio = factory(lbt_enabled=False)
+        _script_modem(radio, [ERR_CHANNEL_BUSY] * 1000)
+        script = radio._send_command.side_effect
+
+        async def clear_error(cmd, *args, **kwargs):
+            result = await script(cmd, *args, **kwargs)
+            if cmd == CMD_RX_START:
+                radio._last_modem_error = None
+            return result
+        radio._send_command = AsyncMock(side_effect=clear_error)
+        result = await radio.send(b"payload")
+        assert result["ok"] is False
+        assert result["tx_outcome_uncertain"] is False
+        assert result["reason"] == "channel_busy"
+
+
+async def test_modem_tx_fail_does_not_become_retryable():
+    from openhop_core.hardware.protocol_constants import CMD_TX_FAIL
+    for factory in (_usb_radio, _tcp_radio):
+        radio = factory(lbt_enabled=False)
+
+        async def fail_tx(cmd, *args, **kwargs):
+            if cmd == CMD_TX_REQUEST:
+                radio._dispatch_frame(CMD_TX_FAIL, b"")
+                return None
+            return b""
+        radio._send_command = AsyncMock(side_effect=fail_tx)
+        assert await radio.send(b"payload") is None
+        assert sum(c.args[0] == CMD_TX_REQUEST
+                   for c in radio._send_command.await_args_list) == 1
+
+
+async def test_rx_recovery_exception_stays_conservative():
+    for factory in (_usb_radio, _tcp_radio):
+        radio = factory(lbt_enabled=False)
+
+        async def fail_rx(cmd, *args, **kwargs):
+            if cmd == CMD_TX_REQUEST:
+                radio._last_modem_error = ERR_CHANNEL_BUSY
+                return None
+            raise RuntimeError("RX recovery failed")
+        radio._send_command = AsyncMock(side_effect=fail_rx)
+        assert await radio.send(b"payload") is None
