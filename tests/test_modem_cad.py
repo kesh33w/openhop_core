@@ -179,8 +179,10 @@ async def test_modem_commands_with_same_response_are_serialized(radio_cls):
     original_write = radio._sock_write if radio_cls is TCPLoRaRadio else radio._serial.write
 
     def write_and_respond(_frame):
-        result = original_write(_frame) if radio_cls is TCPLoRaRadio else None
-        asyncio.create_task(dispatch_response(b"\x01"))
+        result = original_write(_frame) if radio_cls is TCPLoRaRadio else len(_frame)
+        radio._event_loop.call_soon_threadsafe(
+            lambda: asyncio.create_task(dispatch_response(b"\x01"))
+        )
         return result
 
     if radio_cls is TCPLoRaRadio:

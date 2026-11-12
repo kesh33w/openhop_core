@@ -79,6 +79,7 @@ async def _assert_busy_error_wakes_tx_waiter(radio):
     if isinstance(radio, USBLoRaRadio):
         radio._serial = Mock()
         radio._serial.is_open = True
+        radio._serial.write.side_effect = len
         radio._connected_event.set()
     else:
         radio._sock = Mock()
@@ -92,7 +93,8 @@ async def _assert_busy_error_wakes_tx_waiter(radio):
             timeout=0.5,
         )
     )
-    await asyncio.sleep(0)
+    while CMD_TX_DONE not in radio._response_events:
+        await asyncio.sleep(0)
     radio._dispatch_frame(CMD_ERROR, bytes([ERR_CHANNEL_BUSY]))
 
     assert await asyncio.wait_for(pending, timeout=0.1) is None

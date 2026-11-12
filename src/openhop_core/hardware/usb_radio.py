@@ -32,6 +32,7 @@ import asyncio
 import inspect
 import logging
 import os
+import queue
 import random
 import struct
 import threading
@@ -195,6 +196,33 @@ class USBLoRaRadio(_RadioBase):
         # for CMD_CAD_PARAMS_RESP. Without serialization the second waiter
         # replaces the first entry in _response_events and one update times out.
         self._command_lock = asyncio.Lock()
+        # Each radio has one bounded daemon writer, never the shared executor.
+        # A wedged OS write can disable this radio, but cannot block asyncio,
+        # consume unbounded threads, or overlap a new serial session.
+        self._write_queue = queue.Queue(maxsize=1)
+        self._writer_thread: Optional[threading.Thread] = None
+        self._serial_io_lock = threading.Lock()
+        self._reconnect_requested = threading.Event()
+        self._generation = 0
+        self._pending_commands = 0
+        self._max_pending_commands = 16
+        self._write_timeout = 2.5  # pyserial's own write_timeout is 2 seconds
+        self._queue_timeout = 5.0
+        self._last_io_health_log = 0.0
+        self._io_stats = {
+            "commands": 0,
+            "write_timeouts": 0,
+            "response_timeouts": 0,
+            "write_errors": 0,
+            "queue_rejections": 0,
+            "cancellations": 0,
+            "reconnects": 0,
+            "last_failure": None,
+            "last_command": None,
+            "last_write_ms": None,
+            "last_response_ms": None,
+            "last_rx_at": None,
+        }
 
         # Custom CAD thresholds. Set lazily by set_custom_cad_thresholds()
         # or perform_cad(det_peak=..., det_min=...); kept in attributes from
@@ -233,6 +261,11 @@ class USBLoRaRadio(_RadioBase):
         """Initialize USB serial connection and configure the modem radio."""
         if self._initialized:
             return True
+        # Never reuse an instance while its previous I/O owners are exiting.
+        if any(t and t.is_alive() for t in (self._rx_thread, self._writer_thread)):
+            return False
+        self._stop_event.clear()
+        self._reconnect_requested.clear()
 
         try:
             # dsrdtr=True tells pyserial to leave DTR/DSR alone on open
@@ -509,6 +542,27 @@ class USBLoRaRadio(_RadioBase):
         Called by Dispatcher.run_forever() every 60 seconds.
         Also refreshes cached modem metrics from the modem.
         """
+        now = time.monotonic()
+        if now - self._last_io_health_log >= 60.0:
+            self._last_io_health_log = now
+            logger.info(
+                "Serial health: port=%s connected=%s generation=%s pending=%s "
+                "tx=%s rx=%s write_timeouts=%s response_timeouts=%s write_errors=%s "
+                "queue_rejections=%s reconnects=%s last_write_ms=%s last_response_ms=%s",
+                self.port,
+                self._connected_event.is_set(),
+                self._generation,
+                self._pending_commands,
+                self._tx_count,
+                self._rx_count,
+                self._io_stats["write_timeouts"],
+                self._io_stats["response_timeouts"],
+                self._io_stats["write_errors"],
+                self._io_stats["queue_rejections"],
+                self._io_stats["reconnects"],
+                self._io_stats["last_write_ms"],
+                self._io_stats["last_response_ms"],
+            )
         if not self._initialized or not self._connected_event.is_set():
             return False
 
@@ -551,6 +605,13 @@ class USBLoRaRadio(_RadioBase):
             "rx_count": self._rx_count,
             "crc_errors": self._crc_errors,
             "crc_error_count": self.crc_error_count,
+            "serial_io": {
+                **self._io_stats,
+                "generation": self._generation,
+                "pending_commands": self._pending_commands,
+                "reconnecting": self._reconnect_requested.is_set(),
+                "writer_alive": bool(self._writer_thread and self._writer_thread.is_alive()),
+            },
         }
 
     async def get_modem_status(self) -> Optional[dict]:
@@ -806,18 +867,99 @@ class USBLoRaRadio(_RadioBase):
         }
 
     def cleanup(self):
-        """Clean up resources."""
+        """Stop accepting work without joining an OS-blocked thread on asyncio."""
+        if self._stop_event.is_set():
+            return
         self._initialized = False
-        self._connected_event.clear()
+        self._invalidate_connection("cleanup")
         self._stop_event.set()
+        # The I/O owners close the captured handle after any write finishes.
+        # With no owners (e.g. partial begin), close on a daemon, not this loop.
+        if not any(t and t.is_alive() for t in (self._rx_thread, self._writer_thread)):
+            if self._serial is not None:
+                self._writer_thread = threading.Thread(
+                    target=self._close_serial_sync, daemon=True, name="usb-lora-close"
+                )
+                self._writer_thread.start()
+        logger.info("USBLoRaRadio cleanup requested: port=%s", self.port)
 
-        if self._rx_thread and self._rx_thread.is_alive():
-            self._rx_thread.join(timeout=2.0)
+    def _close_serial_sync(self):
+        with self._serial_io_lock:
+            if self._serial is not None:
+                try:
+                    self._serial.close()
+                except Exception:
+                    logger.debug("Serial close failed: port=%s", self.port, exc_info=True)
+                self._serial = None
 
-        if self._serial and self._serial.is_open:
-            self._serial.close()
+    def _invalidate_connection(self, reason, generation=None):
+        """Retire one session and wake waiters; never perform serial I/O here."""
+        with self._response_lock:
+            if generation is not None and generation != self._generation:
+                return
+            self._generation += 1
+            self._connected_event.clear()
+            self._reconnect_requested.set()
+            self._last_modem_error = None
+            if reason != "cleanup":
+                self._io_stats["last_failure"] = reason
+            for cmd, evt in self._response_events.items():
+                self._response_data[cmd] = None
+                self._wake_event(evt)
+        log = logger.debug if reason == "cleanup" else logger.warning
+        log(
+            "Serial session retired: port=%s generation=%s reason=%s",
+            self.port,
+            self._generation,
+            reason,
+        )
 
-        logger.info("USBLoRaRadio cleanup complete")
+    def _wake_event(self, evt):
+        if self._event_loop and not self._event_loop.is_closed():
+            try:
+                self._event_loop.call_soon_threadsafe(evt.set)
+            except RuntimeError:
+                pass  # Loop may close concurrently with shutdown.
+
+    def _write_worker(self):
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    handle, generation, frame, done, result = self._write_queue.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                try:
+                    with self._serial_io_lock:
+                        if (
+                            generation != self._generation
+                            or self._stop_event.is_set()
+                            or not self._connected_event.is_set()
+                        ):
+                            raise serial.SerialException("serial session retired before write")
+                        started = time.monotonic()
+                        # Do not call flush(): POSIX tcdrain has no timeout.
+                        # A matching firmware response is the delivery barrier.
+                        written = handle.write(frame)
+                        if written != len(frame):
+                            raise serial.SerialException(
+                                f"short serial write: {written}/{len(frame)}"
+                            )
+                        result["write_ms"] = (time.monotonic() - started) * 1000
+                except Exception as exc:
+                    result["error"] = exc
+                finally:
+                    done.set()
+                    self._write_queue.task_done()
+        finally:
+            if self._stop_event.is_set():
+                self._close_serial_sync()
+
+    def _ensure_write_worker(self):
+        if self._writer_thread is None or not self._writer_thread.is_alive():
+            self._writer_thread = threading.Thread(
+                target=self._write_worker, daemon=True, name=f"usb-lora-tx:{self.port}"
+            )
+            self._writer_thread.start()
 
     # ══════════════════════════════════════════════════════════
     # Private — serial I/O
@@ -858,40 +1000,81 @@ class USBLoRaRadio(_RadioBase):
         return handle
 
     def _reconnect_serial_sync(self) -> bool:
-        """Reopen a re-enumerated USB modem and restore radio/CAD state."""
-        if self._serial is not None:
+        """Reopen only after the old writer exits, then establish a response barrier.
+
+        Modem firmware handles commands serially: CONFIG_RESP follows any old
+        TX_DONE/error. Consuming that response before publishing the new session
+        prevents untagged late replies from satisfying a new command. Never
+        replay the command whose outcome was unknown.
+        """
+        self._connected_event.clear()
+        self._reconnect_requested.set()
+        handle = self._serial
+        # Cancellation is best effort and runs on this radio's RX thread.
+        if handle is not None and hasattr(handle, "cancel_write"):
             try:
-                self._serial.close()
+                handle.cancel_write()
             except Exception:
                 pass
-
-        attempt = 0
-        while not self._stop_event.is_set():
-            attempt += 1
-            try:
-                self._serial = self._open_serial_sync()
-                time.sleep(0.3)
-                self._serial.reset_input_buffer()
-                if not self._apply_config_sync():
-                    raise RuntimeError("modem did not acknowledge restored configuration")
-                self._connected_event.set()
-                logger.info(
-                    "USB modem reconnected on %s after %s attempt(s)",
-                    self._serial.port,
-                    attempt,
+        waited = time.monotonic()
+        while not self._serial_io_lock.acquire(timeout=0.1):
+            if self._stop_event.is_set():
+                return False
+            if time.monotonic() - waited >= 5.0:
+                logger.warning(
+                    "Serial recovery waiting for old writer: port=%s generation=%s",
+                    self.port,
+                    self._generation,
                 )
-                return True
-            except Exception as exc:
-                self._connected_event.clear()
-                if self._serial is not None:
-                    try:
-                        self._serial.close()
-                    except Exception:
-                        pass
-                if attempt == 1 or attempt % 10 == 0:
-                    logger.warning("USB modem reconnect attempt %s failed: %s", attempt, exc)
-                self._stop_event.wait(2.0)
-        return False
+                waited = time.monotonic()
+        try:
+            if self._serial is not None:
+                try:
+                    self._serial.close()
+                except Exception:
+                    pass
+            attempt = 0
+            while not self._stop_event.is_set():
+                attempt += 1
+                try:
+                    with self._response_lock:
+                        self._generation += 1
+                    self._serial = self._open_serial_sync()
+                    if self._stop_event.wait(0.3):
+                        return False
+                    self._serial.reset_input_buffer()
+                    if not self._apply_config_sync():
+                        raise RuntimeError("modem did not acknowledge restored configuration")
+                    if self._stop_event.is_set():
+                        return False
+                    self._reconnect_requested.clear()
+                    self._connected_event.set()
+                    self._io_stats["reconnects"] += 1
+                    logger.info(
+                        "USB modem reconnected: port=%s generation=%s attempts=%s",
+                        self._serial.port,
+                        self._generation,
+                        attempt,
+                    )
+                    return True
+                except Exception as exc:
+                    self._connected_event.clear()
+                    if self._serial is not None:
+                        try:
+                            self._serial.close()
+                        except Exception:
+                            pass
+                    if attempt == 1 or attempt % 10 == 0:
+                        logger.warning(
+                            "USB modem reconnect failed: port=%s attempt=%s error=%s",
+                            self.port,
+                            attempt,
+                            exc,
+                        )
+                    self._stop_event.wait(2.0)
+            return False
+        finally:
+            self._serial_io_lock.release()
 
     def _ping_sync(self, timeout: float = 3.0) -> bool:
         """Synchronous ping — ad-hoc liveness probe.
@@ -937,6 +1120,7 @@ class USBLoRaRadio(_RadioBase):
             )
             if not self._apply_cad_config_sync():
                 logger.warning("Radio configured but cached CAD settings were not restored")
+                return False
             return True
         elif resp and resp[0] == CMD_ERROR:
             err = resp[1][0] if len(resp) > 1 and len(resp[1]) > 0 else 0xFF
@@ -985,9 +1169,9 @@ class USBLoRaRadio(_RadioBase):
         # bounded by `deadline`. Longer timeouts (e.g. 35s) were observed
         # to swallow incoming bytes on macOS + CP2102, so we poll instead.
         self._serial.timeout = 0.2
-        deadline = time.time() + timeout
+        deadline = time.monotonic() + timeout
         try:
-            while time.time() < deadline:
+            while time.monotonic() < deadline and not self._stop_event.is_set():
                 b = self._serial.read(1)
                 if len(b) == 0:
                     continue
@@ -1041,13 +1225,21 @@ class USBLoRaRadio(_RadioBase):
 
         while not self._stop_event.is_set():
             try:
-                if not self._serial or not self._serial.is_open:
+                if self._reconnect_requested.is_set():
+                    buf.clear()
+                    if not self._reconnect_serial_sync():
+                        break
+                with self._response_lock:
+                    if self._reconnect_requested.is_set() or self._stop_event.is_set():
+                        continue
+                    handle, generation = self._serial, self._generation
+                if not handle or not handle.is_open:
                     time.sleep(0.1)
                     continue
 
-                waiting = self._serial.in_waiting
+                waiting = handle.in_waiting
                 if waiting > 0:
-                    buf.extend(self._serial.read(waiting))
+                    buf.extend(handle.read(waiting))
                 else:
                     time.sleep(0.001)
                     continue
@@ -1097,22 +1289,31 @@ class USBLoRaRadio(_RadioBase):
                         logger.warning(f"RX CRC mismatch, cmd=0x{cmd:02X}, dropping")
                         continue
 
-                    self._dispatch_frame(cmd, payload)
+                    self._dispatch_frame(cmd, payload, generation=generation)
 
             except (serial.SerialException, OSError) as e:
                 buf.clear()
-                self._connected_event.clear()
-                logger.warning("USB modem disconnected: %s", e)
+                self._invalidate_connection(f"read_error:{type(e).__name__}")
+                logger.warning("USB modem disconnected: port=%s error=%s", self.port, e)
                 if not self._reconnect_serial_sync():
                     break
             except Exception as e:
                 logger.error(f"RX worker error: {e}")
                 time.sleep(0.1)
 
-        logger.debug("RX worker thread exiting")
+        self._close_serial_sync()
+        logger.debug("RX worker thread exiting: port=%s", self.port)
 
-    def _dispatch_frame(self, cmd: int, payload: bytes):
-        """Route a received frame to the right handler."""
+    def _deliver_rx_current(self, generation, callback, data, rssi, snr):
+        if generation == self._generation and not self._stop_event.is_set():
+            _deliver_rx_packet(callback, data, rssi, snr)
+
+    def _dispatch_frame(self, cmd: int, payload: bytes, generation=None):
+        """Route only frames from the current serial session."""
+        if generation is None:
+            generation = self._generation
+        if generation != self._generation or self._stop_event.is_set():
+            return
 
         if cmd == CMD_RX_PACKET:
             # ── LoRa packet received ─────────────────────────
@@ -1130,6 +1331,7 @@ class USBLoRaRadio(_RadioBase):
             self.last_snr = snr
             self.last_signal_rssi = signal_rssi
             self._rx_count += 1
+            self._io_stats["last_rx_at"] = time.time()
 
             logger.debug(f"RX: {len(lora_data)}B RSSI={rssi}dBm SNR={snr_x10 / 10:.1f}dB")
 
@@ -1143,7 +1345,7 @@ class USBLoRaRadio(_RadioBase):
             if callback:
                 if self._event_loop and self._event_loop.is_running():
                     self._event_loop.call_soon_threadsafe(
-                        _deliver_rx_packet, callback, lora_data, rssi, snr
+                        self._deliver_rx_current, generation, callback, lora_data, rssi, snr
                     )
                 else:
                     logger.warning("RX packet but event loop not running — dropping")
@@ -1157,14 +1359,16 @@ class USBLoRaRadio(_RadioBase):
                 logger.debug(f"Modem error: 0x{err_code:02X} (channel busy)")
             else:
                 logger.warning(f"Modem error: 0x{err_code:02X}")
-            self._last_modem_error = err_code
             # Also signal any waiting command in case the error
             # is a response to our command
             with self._response_lock:
+                if generation != self._generation:
+                    return
                 for evt_cmd, evt in list(self._response_events.items()):
-                    self._response_data[evt_cmd] = None
-                    if self._event_loop:
-                        self._event_loop.call_soon_threadsafe(evt.set)
+                    if evt_cmd not in self._response_data:
+                        self._last_modem_error = err_code
+                        self._response_data[evt_cmd] = None
+                        self._wake_event(evt)
 
         elif cmd == CMD_TX_FAIL:
             # The TX request reached the radio but the chip never asserted
@@ -1173,20 +1377,22 @@ class USBLoRaRadio(_RadioBase):
             # driver timeout.
             logger.warning("[TX] Modem TX_FAIL - radio did not assert TX_DONE")
             with self._response_lock:
+                if generation != self._generation:
+                    return
                 evt = self._response_events.get(CMD_TX_DONE)
-                if evt is not None:
+                if evt is not None and CMD_TX_DONE not in self._response_data:
                     self._response_data[CMD_TX_DONE] = None
-                    if self._event_loop:
-                        self._event_loop.call_soon_threadsafe(evt.set)
+                    self._wake_event(evt)
 
         else:
             # ── Command response ─────────────────────────────
             with self._response_lock:
-                if cmd in self._response_events:
+                if generation != self._generation:
+                    return
+                if cmd in self._response_events and cmd not in self._response_data:
                     self._response_data[cmd] = payload
                     evt = self._response_events[cmd]
-                    if self._event_loop:
-                        self._event_loop.call_soon_threadsafe(evt.set)
+                    self._wake_event(evt)
 
     # ── Async command/response ────────────────────────────────
 
@@ -1197,41 +1403,98 @@ class USBLoRaRadio(_RadioBase):
         expect_cmd: int,
         timeout: float = 5.0,
     ) -> Optional[bytes]:
-        """Send a command frame and wait for a specific response frame."""
-        async with self._command_lock:
-            if not self._connected_event.is_set() or not self._serial or not self._serial.is_open:
+        """Bound admission, serial write and response separately, per radio."""
+        if not self._connected_event.is_set() or self._stop_event.is_set():
+            return None
+        if self._pending_commands >= self._max_pending_commands:
+            self._io_stats["queue_rejections"] += 1
+            logger.warning("Serial command queue full: port=%s cmd=0x%02X", self.port, cmd)
+            return None
+        self._pending_commands += 1
+        generation = self._generation
+        acquired = False
+        submitted = False
+        evt = None
+        started = time.monotonic()
+        try:
+            try:
+                await asyncio.wait_for(self._command_lock.acquire(), self._queue_timeout)
+                acquired = True
+            except asyncio.TimeoutError:
+                self._io_stats["queue_rejections"] += 1
+                logger.warning("Serial command queue timeout: port=%s cmd=0x%02X", self.port, cmd)
                 return None
-
-            # Ensure event loop is captured
-            if self._event_loop is None:
-                try:
-                    self._event_loop = asyncio.get_running_loop()
-                except RuntimeError:
-                    pass
-
-            # Register response expectation
+            handle = self._serial
+            if (
+                generation != self._generation
+                or not self._connected_event.is_set()
+                or not handle
+                or not handle.is_open
+                or self._stop_event.is_set()
+            ):
+                return None
+            self._event_loop = asyncio.get_running_loop()
             evt = asyncio.Event()
             with self._response_lock:
                 self._response_events[expect_cmd] = evt
                 self._response_data.pop(expect_cmd, None)
-
-            try:
-                frame = build_frame(cmd, payload)
-                self._serial.write(frame)
-                self._serial.flush()
-
-                try:
-                    await asyncio.wait_for(evt.wait(), timeout=timeout)
-                except asyncio.TimeoutError:
-                    logger.warning(f"Timeout: cmd=0x{cmd:02X} → expected 0x{expect_cmd:02X}")
+                self._last_modem_error = None
+            done, result = threading.Event(), {}
+            self._ensure_write_worker()
+            self._write_queue.put_nowait(
+                (handle, generation, build_frame(cmd, payload), done, result)
+            )
+            submitted = True
+            self._io_stats["commands"] += 1
+            self._io_stats["last_command"] = f"0x{cmd:02X}"
+            write_deadline = time.monotonic() + self._write_timeout
+            while not done.is_set():
+                if generation != self._generation:
                     return None
-
-                return self._response_data.get(expect_cmd)
-
-            finally:
+                if time.monotonic() >= write_deadline:
+                    self._io_stats["write_timeouts"] += 1
+                    self._invalidate_connection(f"write_timeout:0x{cmd:02X}", generation)
+                    return None
+                await asyncio.sleep(0.005)
+            if generation != self._generation:
+                return None
+            if "error" in result:
+                self._io_stats["write_errors"] += 1
+                self._invalidate_connection(f"write_error:0x{cmd:02X}", generation)
+                logger.warning(
+                    "Serial write failed: port=%s cmd=0x%02X error=%s",
+                    self.port,
+                    cmd,
+                    result["error"],
+                )
+                return None
+            self._io_stats["last_write_ms"] = round(result["write_ms"], 2)
+            try:
+                await asyncio.wait_for(evt.wait(), timeout=timeout)
+            except asyncio.TimeoutError:
+                self._io_stats["response_timeouts"] += 1
+                self._invalidate_connection(f"response_timeout:0x{cmd:02X}", generation)
+                return None
+            if generation != self._generation:
+                return None
+            self._io_stats["last_response_ms"] = round((time.monotonic() - started) * 1000, 2)
+            return self._response_data.get(expect_cmd)
+        except asyncio.CancelledError:
+            if submitted:
+                self._io_stats["cancellations"] += 1
+                self._invalidate_connection(f"command_cancelled:0x{cmd:02X}", generation)
+            raise
+        except queue.Full:
+            self._io_stats["queue_rejections"] += 1
+            return None
+        finally:
+            if acquired:
                 with self._response_lock:
-                    self._response_events.pop(expect_cmd, None)
-                    self._response_data.pop(expect_cmd, None)
+                    if evt is not None and self._response_events.get(expect_cmd) is evt:
+                        self._response_events.pop(expect_cmd, None)
+                        self._response_data.pop(expect_cmd, None)
+                self._command_lock.release()
+            self._pending_commands -= 1
 
     async def _perform_cad(self, timeout: float = 1.0) -> bool:
         """Perform Channel Activity Detection. Returns True if busy."""
@@ -1277,6 +1540,8 @@ class USBLoRaRadio(_RadioBase):
             future = asyncio.run_coroutine_threadsafe(coro, self._event_loop)
             return future.result(timeout=wait_timeout) is not None
         except Exception as exc:
+            if "future" in locals():
+                future.cancel()
             logger.error("Cross-thread CAD config push error: %s", exc, exc_info=True)
             return False
 

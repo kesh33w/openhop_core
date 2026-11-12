@@ -99,7 +99,8 @@ def test_canonical_and_legacy_usb_radio_types_use_usb_transport(monkeypatch):
 
 
 def _status_radio(radio_class: type[Any], **transport_fields):
-    radio = object.__new__(radio_class)
+    radio = (radio_class(**transport_fields) if radio_class is USBLoRaRadio
+             else object.__new__(radio_class))
     fields = {
         "_initialized": True,
         "frequency": 869_618_000,
