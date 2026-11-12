@@ -312,6 +312,7 @@ class USBLoRaRadio(_RadioBase):
             # for the whole budget. The deadline is shared with the
             # ERR_CHANNEL_BUSY retry below, so firmware-side auto-CAD refusals
             # draw from the same budget.
+            cad_timeout = min(1.0, self.lbt_max_wait_seconds)
             lbt_deadline = time.monotonic() + self.lbt_max_wait_seconds
             cad_checks = 0
             modem_refusals = 0
@@ -326,15 +327,29 @@ class USBLoRaRadio(_RadioBase):
                             "channel still busy, transmitting anyway"
                         )
                         break
+                    # A shortened final response wait can retire a healthy modem
+                    # session before its CAD response arrives. Keep the normal
+                    # response allowance; wait out the remaining busy budget
+                    # instead of issuing a command we cannot wait for.
+                    if cad_checks and remaining < cad_timeout:
+                        await asyncio.sleep(remaining)
+                        continue
                     try:
                         cad_checks += 1
-                        channel_busy = await self._perform_cad(timeout=min(1.0, remaining))
+                        channel_busy = await self._perform_cad(timeout=cad_timeout)
                     except Exception as e:
-                        outcome = "exception"
-                        logger.warning(
-                            f"[LBT] Channel check failed: {e}, proceeding with transmission"
-                        )
-                        break
+                        logger.warning(f"[LBT] Channel check unavailable: {e}; not transmitting")
+                        # No TX request has been submitted. Unknown CAD is not
+                        # a clear channel, and must not authorize transmission.
+                        return {
+                            "ok": False,
+                            "tx_outcome_uncertain": False,
+                            "reason": "cad_unavailable",
+                            "airtime_ms": 0.0,
+                            "lbt_attempts": len(lbt_backoff_delays),
+                            "lbt_backoff_delays_ms": lbt_backoff_delays,
+                            "lbt_channel_busy": bool(lbt_backoff_delays),
+                        }
                     if not channel_busy:
                         break
                     if time.monotonic() >= lbt_deadline:
@@ -1226,7 +1241,7 @@ class USBLoRaRadio(_RadioBase):
             expect_cmd=CMD_CAD_RESP,
             timeout=timeout,
         )
-        if resp and len(resp) >= 1:
+        if resp in (b"\x00", b"\x01"):
             busy = resp[0] != 0
             logger.debug(
                 "[CAD] BUSY - channel activity detected"
@@ -1234,9 +1249,7 @@ class USBLoRaRadio(_RadioBase):
                 else "[CAD] CLEAR - no channel activity detected"
             )
             return busy
-        else:
-            logger.warning("[CAD] No response - assuming clear")
-            return False
+        raise RuntimeError("CAD response missing or malformed")
 
     # ── Config setters (for runtime reconfiguration) ──────────
 

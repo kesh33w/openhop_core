@@ -120,8 +120,8 @@ async def test_usb_lbt_budget_is_time_bounded():
     elapsed = time.monotonic() - started
 
     assert result is not None  # forced TX at budget exhaustion, loudly logged
-    # Many short checks within the budget; the exact count is timing-dependent.
-    assert radio._perform_cad.await_count > 5
+    # The .5s budget allows one complete CAD response window.
+    assert radio._perform_cad.await_count == 1
     assert 0.4 <= elapsed <= 2.0
     delays = result["lbt_backoff_delays_ms"]
     assert sum(delays) <= 600.0
@@ -151,7 +151,7 @@ async def test_tcp_lbt_budget_is_time_bounded():
     elapsed = time.monotonic() - started
 
     assert result is not None
-    assert radio._perform_cad.await_count > 5
+    assert radio._perform_cad.await_count == 1
     assert 0.4 <= elapsed <= 2.0
 
 
