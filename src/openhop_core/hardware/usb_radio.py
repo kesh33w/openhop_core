@@ -975,6 +975,12 @@ class USBLoRaRadio(_RadioBase):
 
     def _resolve_serial_port(self) -> str:
         """Resolve the configured modem after USB re-enumeration."""
+        # An explicit physical USB path is authoritative. Some bridges share
+        # VID/PID and serial number, so rediscovery by those fields can open a
+        # different radio and apply this radio's frequency to it. Opening the
+        # original path also fails closed while that port is unplugged.
+        if self.port.startswith("/dev/serial/by-path/"):
+            return self.port
         if self._port_identity is not None:
             expected_vid, expected_pid, expected_serial = self._port_identity
             for info in list_ports.comports():

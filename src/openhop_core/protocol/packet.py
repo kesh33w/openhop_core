@@ -112,6 +112,7 @@ class Packet:
         "_snr",
         "_rssi",
         "_rx_radio_id",
+        "_reply_to_radio_id",
         "_private_peer",
         "_private_peer_deadline",
         "_do_not_retransmit",
@@ -144,6 +145,7 @@ class Packet:
         self._snr = 0
         self._rssi = 0
         self._rx_radio_id = None
+        self._reply_to_radio_id = None
         self._private_peer = False
         self._private_peer_deadline = None
         # Repeater flag to prevent retransmission and log drop reason
@@ -483,6 +485,8 @@ class Packet:
         # would make both send-layer resolvers skip a packet they have never
         # seen. The dispatcher's own RX builds a fresh Packet, so this is a
         # guard on the public API rather than a fix to a shipped path.
+        self._reply_to_radio_id = None
+        self._rx_radio_id = None
         self._recv_region_captured = False
         self._recv_region_key = None
         self._recv_region_unscoped = False

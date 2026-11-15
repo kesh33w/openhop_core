@@ -8,7 +8,9 @@ explicit radio for TX. Each physical callback yields one ``RFIngress`` with one
 from __future__ import annotations
 
 import inspect
+import hashlib
 import logging
+import time
 from collections import OrderedDict
 from typing import Any, Awaitable, Callable, Optional, Union
 
@@ -85,6 +87,11 @@ class RFFabric:
         self._legacy_rx_callback: Optional[LegacyRxCallback] = None
         self._tx_selector: Optional[TxSelector] = None
         self._tx_selector_takes_rx = False
+        self.topology = None
+        self.comparison = None
+        self._network_tx_seen = OrderedDict()
+        self.network_tx_duplicates = 0
+        self.network_tx_capacity_drops = 0
         self._armed = False
         # Latest delivered reception metrics (for FabricRadio get_last_*).
         self._last_rssi: int = 0
@@ -170,9 +177,19 @@ class RFFabric:
         if self._default_radio_id == radio_id:
             self._default_radio_id = next(iter(self._radios.keys()), None)
 
+    def configure_topology(self, topology):
+        from .topology import ReceptionComparison
+        missing = set(topology.members) - set(self._radios)
+        if set(self._radios) - set(topology.members) or any(not topology.is_shadow(rid) for rid in missing):
+            raise ValueError("Topology must describe all radios and have both transmitters")
+        self.topology = topology
+        self.comparison = ReceptionComparison(topology)
+
     def set_default_radio(self, radio_id: str) -> None:
         if radio_id not in self._radios:
             raise KeyError(f"Unknown radio_id={radio_id!r}")
+        if self.topology:
+            self.topology.check_tx(radio_id)
         self._default_radio_id = radio_id
 
     def set_tx_selector(self, selector: Optional[TxSelector]) -> None:
@@ -256,6 +273,17 @@ class RFFabric:
         snr: Optional[float] = None,
     ) -> None:
         """Convert one radio callback into one RFIngress + one legacy fire."""
+        if self.topology:
+            from ..protocol.packet import Packet
+            try:
+                packet = Packet()
+                packet.read_from(data)
+                self.comparison.receive(radio_id, packet.calculate_packet_hash().hex(), hashlib.sha256(data).digest())
+            except Exception:
+                # Malformed frames never enter forwarding or the comparison denominator.
+                return
+            if self.topology.is_shadow(radio_id):
+                return
         reception = RadioReception(
             data=data,
             rssi=rssi,
@@ -291,12 +319,15 @@ class RFFabric:
 
         if self._legacy_rx_callback is not None:
             try:
-                self._legacy_rx_callback(data, rssi, snr)
-            except TypeError:
-                try:
-                    self._legacy_rx_callback(data)  # type: ignore[misc,call-arg]
-                except Exception:
-                    logger.exception("RFFabric legacy RX callback failed")
+                if _selector_takes_rx(self._legacy_rx_callback):
+                    self._legacy_rx_callback(data, rssi, snr, rx_radio_id=radio_id)
+                else:
+                    try:
+                        inspect.signature(self._legacy_rx_callback).bind(data, rssi, snr)
+                    except (TypeError, ValueError):
+                        self._legacy_rx_callback(data)
+                    else:
+                        self._legacy_rx_callback(data, rssi, snr)
             except Exception:
                 logger.exception("RFFabric legacy RX callback failed")
 
@@ -310,6 +341,7 @@ class RFFabric:
         radio_id: Optional[str] = None,
         *,
         rx_radio_id: Optional[str] = None,
+        reply_to_radio_id: Optional[str] = None,
     ) -> str:
         """Choose which registered radio should transmit ``data``.
 
@@ -319,6 +351,18 @@ class RFFabric:
         and the send will agree. Selectors of the original one-argument shape
         never see it and behave exactly as they did.
         """
+        if self.topology:
+            if radio_id is None:
+                if reply_to_radio_id is not None:
+                    radio_id = self.topology.reply_destination(reply_to_radio_id)
+                elif rx_radio_id is None:
+                    radio_id = self.topology.default_radio
+                else:
+                    destinations = self.topology.relay_destinations(rx_radio_id)
+                    if not destinations:
+                        raise ValueError("Shadow receivers cannot cause TX")
+                    radio_id = destinations[0]
+            self.topology.check_tx(radio_id, rx_radio_id, reply_to_radio_id=reply_to_radio_id)
         if radio_id is not None:
             if radio_id not in self._radios:
                 raise KeyError(f"Unknown radio_id={radio_id!r}")
@@ -343,6 +387,7 @@ class RFFabric:
         *,
         radio_id: Optional[str] = None,
         rx_radio_id: Optional[str] = None,
+        reply_to_radio_id: Optional[str] = None,
     ) -> Any:
         """Transmit via default, selector, or explicit ``radio_id``.
 
@@ -353,11 +398,60 @@ class RFFabric:
         ``radio_id`` so callers (Dispatcher TX logs) know which endpoint TX'd.
         Non-dict results are returned unchanged for legacy radios.
         """
-        rid = self.resolve_tx_radio_id(data, radio_id, rx_radio_id=rx_radio_id)
+        rid = self.resolve_tx_radio_id(data, radio_id, rx_radio_id=rx_radio_id, reply_to_radio_id=reply_to_radio_id)
         radio = self._radios[rid]
+        if self.topology and getattr(radio, 'is_connected', True) is False:
+            return {'ok': False, 'radio_id': rid, 'reason': 'designated transmitter disconnected'}
         if not hasattr(radio, "send"):
             raise RuntimeError(f"Radio {rid!r} ({type(radio).__name__}) does not support send()")
-        result = await radio.send(data)
+        network = None
+        claim = None
+        if self.topology:
+            from ..protocol.packet import Packet
+            from ..protocol.constants import PAYLOAD_TYPE_ACK, PAYLOAD_TYPE_MULTIPART
+            packet = Packet()
+            packet.read_from(data)
+            # ACK redundancy is protocol-defined and must retain its extra copies.
+            is_ack = packet.get_payload_type() == PAYLOAD_TYPE_ACK or (
+                packet.get_payload_type() == PAYLOAD_TYPE_MULTIPART and packet.payload
+                and packet.payload[0] & 0x0f == PAYLOAD_TYPE_ACK)
+            if not is_ack:
+                now = time.monotonic()
+                while self._network_tx_seen and now - next(iter(self._network_tx_seen.values())) > 300:
+                    self._network_tx_seen.popitem(last=False)
+                claim = (self.topology.network(rid), packet.calculate_packet_hash().hex())
+                if claim in self._network_tx_seen:
+                    self.network_tx_duplicates += 1
+                    return {'ok': False, 'radio_id': rid, 'reason': 'destination duplicate'}
+                if len(self._network_tx_seen) >= 10000:
+                    self.network_tx_capacity_drops += 1
+                    return {'ok': False, 'radio_id': rid, 'reason': 'destination cache full'}
+                # Claim synchronously before any await, including concurrent sends.
+                self._network_tx_seen[claim] = now
+        if self.comparison:
+            from ..protocol.packet import Packet
+            packet = Packet()
+            packet.read_from(data)
+            network = self.comparison.start_tx(rid, hashlib.sha256(data).digest(), packet.calculate_packet_hash().hex())
+        result = None
+        send_exception = False
+        try:
+            result = await radio.send(data)
+        except BaseException:
+            send_exception = True
+            raise
+        finally:
+            failed = result is False or (isinstance(result, dict) and result.get('ok') is False
+                                         and not result.get('tx_outcome_uncertain'))
+            if failed and claim is not None:
+                self._network_tx_seen.pop(claim, None)
+            if network is not None:
+                self.comparison.end_tx(
+                    network, hashlib.sha256(data).digest(), failed=failed,
+                    outcome=("exception" if send_exception else
+                             "uncertain" if isinstance(result, dict) and result.get("tx_outcome_uncertain") else
+                             "confirmed" if result is True or isinstance(result, dict) and result.get("ok") is True else
+                             "not_confirmed"))
         if isinstance(result, dict):
             # Do not overwrite if the radio already stamped a more specific id.
             result.setdefault("radio_id", rid)

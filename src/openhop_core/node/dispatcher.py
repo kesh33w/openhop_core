@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar
 import enum
 import inspect
+import hashlib
 import logging
 import random
 import time
@@ -124,6 +126,7 @@ class Dispatcher:
         # firmware), handler response delays (e.g. login_server 300 ms), and serial/
         # event-loop scheduling. KISS wrapper relies on modem CSMA by default (no host LBT).
         self.radio = radio
+        self._reply_ingress = ContextVar("dispatcher_reply_ingress", default=None)
         self.tx_delay = tx_delay
         self.state: DispatcherState = DispatcherState.IDLE
 
@@ -251,6 +254,11 @@ class Dispatcher:
         self._stopped_event: Optional[asyncio.Event] = None
         self._run_forever_active = False
         self._rx_enabled = True
+        # Applications opt in only when local delivery and forwarding admission
+        # are separated. Core-only users retain ordinary packet deduplication.
+        self.destination_forwarding = False
+        self._topology_rx_tasks = set()
+        self.topology_rx_dropped = 0
 
         # Hook up the radio's receive callback - all radios should support this
         self._arm_rx()
@@ -266,6 +274,8 @@ class Dispatcher:
     def _arm_rx(self) -> None:
         """Register the RX callback and allow new packet tasks."""
         self._rx_enabled = True
+        self._topology_rx_tasks = set()
+        self.topology_rx_dropped = 0
         if self.radio is None:
             return
         if hasattr(self.radio, "set_rx_callback"):
@@ -521,20 +531,34 @@ class Dispatcher:
         data: bytes,
         rssi: Optional[int] = None,
         snr: Optional[float] = None,
+        *, rx_radio_id: Any = _RX_RADIO_ID_UNSET,
     ) -> None:
         """Called by the radio when a packet comes in. rssi/snr are per-packet when provided."""
         if not self._rx_enabled:
             return
         # The fabric's legacy callback is synchronous: capture before scheduling,
         # while last_rx_radio_id still describes this reception.
-        rx_radio_id = self._get_rx_radio_id()
+        if rx_radio_id is _RX_RADIO_ID_UNSET:
+            rx_radio_id = self._get_rx_radio_id()
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(
+            topology = self._network_topology()
+            if topology is not None and len(self._topology_rx_tasks) >= 256:
+                self.topology_rx_dropped += 1
+                return
+            task = loop.create_task(
                 self._process_received_packet(data, rssi, snr, rx_radio_id=rx_radio_id)
             )
+            if topology is not None:
+                self._topology_rx_tasks.add(task)
+                task.add_done_callback(self._topology_rx_tasks.discard)
         except RuntimeError:
             self._log("No event loop running, cannot process received packet")
+
+    def _network_topology(self):
+        from ..rf_fabric.topology import NetworkTopology
+        topology = getattr(getattr(self.radio, "fabric", None), "topology", None)
+        return topology if isinstance(topology, NetworkTopology) else None
 
     def _get_rx_radio_id(self) -> Optional[str]:
         """Read the current ingress from a radio or its fabric adapter."""
@@ -595,6 +619,11 @@ class Dispatcher:
         # An explicitly captured None must not pick up a later reception's id.
         if rx_radio_id is _RX_RADIO_ID_UNSET:
             rx_radio_id = self._get_rx_radio_id()
+        topology = self._network_topology()
+        if topology is not None:
+            # Also guard direct callers that bypass the physical callback.
+            if rx_radio_id not in topology.members or topology.is_shadow(rx_radio_id):
+                return
         # Notify raw RX subscribers so clients can track repeats
         if rssi is not None:
             rssi_val = rssi
@@ -687,10 +716,18 @@ class Dispatcher:
         # first two match firmware's up-front markSeen, and the TRACE hash folds
         # in path_len so its per-hop copies never collide.
         if not self._is_transit_direct_not_next_hop(pkt):
-            if self.dedupe_enabled and self.packet_filter.is_duplicate(packet_hash):
+            forwarding_key = packet_hash
+            if topology and topology.has_receivers and self.destination_forwarding:
+                wire_key = topology.network(rx_radio_id) + ":wire:" + hashlib.sha256(data).hexdigest()
+                if self.packet_filter.is_duplicate(wire_key):
+                    return
+                forwarding_key = packet_hash + ":forward:" + topology.forwarding_class(rx_radio_id)
+            if self.dedupe_enabled and self.packet_filter.is_duplicate(forwarding_key):
                 self._log(f"Duplicate packet ignored (hash: {packet_hash})")
                 return
-            self.packet_filter.track_packet(packet_hash)
+            self.packet_filter.track_packet(forwarding_key)
+            if forwarding_key != packet_hash:
+                self.packet_filter.track_packet(packet_hash)
 
         # Client-repeat: build the retransmit from the just-received packet
         # BEFORE handlers run, so a copy is taken while path/payload are intact
@@ -926,6 +963,8 @@ class Dispatcher:
         fwd.payload = bytearray(pkt.payload[: pkt.payload_len])
         fwd.payload_len = pkt.payload_len
         fwd.transport_codes = list(pkt.transport_codes)
+        if hasattr(pkt, "_rx_radio_id"):
+            fwd._rx_radio_id = pkt._rx_radio_id
         fwd._snr = pkt._snr
         fwd._rssi = pkt._rssi
         fwd._flood_scope_applied = True
@@ -1085,7 +1124,13 @@ class Dispatcher:
             pkt = self._copy_packet_for_forward(pkt)
             pkt.payload = bytearray(ack_bytes)
             pkt.payload_len = len(ack_bytes)
-        return pkt.calculate_packet_hash().hex()[:16]
+        identity = pkt.calculate_packet_hash().hex()[:16]
+        topology = self._network_topology()
+        if topology is not None:
+            rid = getattr(pkt, "_rx_radio_id", None)
+            if rid is not None:
+                return topology.network(rid) + ":" + identity
+        return identity
 
     async def _client_repeat_direct_acks(
         self, pkt: Packet, received_pkt: Packet, delay_ms: float
@@ -1177,6 +1222,12 @@ class Dispatcher:
             expected_crc: The expected CRC for ACK matching.
                 If None, will be calculated from packet.
         """
+        topology = self._network_topology()
+        reply_to = self._reply_ingress.get()
+        if (topology is not None and reply_to is not None
+                and getattr(packet, "_rx_radio_id", None) is None
+                and getattr(packet, "_reply_to_radio_id", None) is None):
+            packet._reply_to_radio_id = reply_to
         # TRACE is only sent via sendDirect() in firmware; flood TRACE is unsupported.
         route_type = packet.get_route_type()
         if route_type in (ROUTE_TYPE_FLOOD, ROUTE_TYPE_TRANSPORT_FLOOD):
@@ -1313,6 +1364,7 @@ class Dispatcher:
         needed (ADVERT/ACK, ``wait_for_ack`` False, or a transmit failure).
         """
         payload_type = packet.get_payload_type()
+        topology = self._network_topology()
 
         # Mark this packet seen before transmitting, matching firmware's
         # hasSeen() call right before sendPacket() in Mesh::sendFlood/
@@ -1325,7 +1377,20 @@ class Dispatcher:
         # ACK when the receive-side claim was only for a multipart packet.
         if packet not in self._regenerated_acks_in_flight:
             packet_hash = self._seen_packet_hash(packet)
+            topology = self._network_topology()
+            if topology is not None:
+                target = self.radio.resolve_tx_radio_id(
+                    packet.write_to(), radio_id, rx_radio_id=getattr(packet, "_rx_radio_id", None),
+                    reply_to_radio_id=getattr(packet, "_reply_to_radio_id", None))
+                packet_hash = topology.network(target) + ":" + packet_hash.rsplit(":", 1)[-1]
             self.packet_filter.track_packet(packet_hash)
+
+            if topology is not None and topology.has_receivers:
+                # Do not let a native TX claim another ear's original reception:
+                # it has the same payload but a different path. Exact wire echoes
+                # are blocked here; destination admission suppresses other repeats.
+                wire_key = topology.network(target) + ":wire:" + hashlib.sha256(packet.write_to()).hexdigest()
+                self.packet_filter.track_packet(wire_key)
 
         # ------------------------------------------------------------------ #
         #  Send the packet (lock ensures only one transmission at a time)
@@ -1338,13 +1403,22 @@ class Dispatcher:
         # None for anything this node originated.
         rx_radio_id = getattr(packet, "_rx_radio_id", None)
         # Resolve which fabric/radio endpoint will TX for log clarity (multi-radio).
-        tx_radio_id = self._resolve_tx_radio_id_for_log(raw, radio_id, rx_radio_id)
+        reply_to = getattr(packet, "_reply_to_radio_id", None)
+        if topology is not None and reply_to is not None:
+            tx_radio_id = self.radio.resolve_tx_radio_id(
+                raw, radio_id, rx_radio_id=rx_radio_id, reply_to_radio_id=reply_to)
+        else:
+            tx_radio_id = self._resolve_tx_radio_id_for_log(raw, radio_id, rx_radio_id)
         try:
             # Prefer fabric/radio multi-radio send(data, radio_id=...) when
             # available; fall back to the legacy single-arg send(raw).
             send_fn = self.radio.send
             pass_rx = rx_radio_id is not None and _names_keyword(send_fn, "rx_radio_id")
-            if radio_id is not None and _names_keyword(send_fn, "radio_id"):
+            reply_to = getattr(packet, "_reply_to_radio_id", None)
+            if topology is not None and reply_to is not None:
+                tx_metadata = await send_fn(raw, radio_id=radio_id, rx_radio_id=rx_radio_id,
+                                           reply_to_radio_id=reply_to)
+            elif radio_id is not None and _names_keyword(send_fn, "radio_id"):
                 if pass_rx:
                     tx_metadata = await send_fn(raw, radio_id=radio_id, rx_radio_id=rx_radio_id)
                 else:
@@ -1536,7 +1610,11 @@ class Dispatcher:
                     f"{pkt.get_path_hash_count()} hop(s) left, not delivered locally"
                 )
             else:
-                result = await handler(pkt)
+                token = self._reply_ingress.set(getattr(pkt, "_rx_radio_id", None))
+                try:
+                    result = await handler(pkt)
+                finally:
+                    self._reply_ingress.reset(token)
                 # Mirror firmware Mesh::onRecvPacket markDoNotRetransmit: a data or
                 # anon packet genuinely decrypted for this identity is consumed and
                 # must not be re-flooded. HandlerResult.authenticated is that
