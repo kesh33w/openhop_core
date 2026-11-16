@@ -177,11 +177,12 @@ class ReceptionComparison:
                                   own_tx_match=own, tx_overlap=bool(self.inflight[network]))
             if own:
                 self.counters[("own_tx_match", rid)] += 1
-                return
+                return True
             if key not in self.rows:
                 self.rows[key] = (now, set())
             self.rows[key][1].add(rid)
             self._expire(self.rows, now)
+            return False
 
     def start_tx(self, rid, identity, payload_identity=None):
         with self.lock:

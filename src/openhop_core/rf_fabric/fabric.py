@@ -85,10 +85,12 @@ class RFFabric:
         self._default_radio_id: Optional[str] = None
         self._ingress_callback: Optional[Callable[[RFIngress], Any]] = None
         self._legacy_rx_callback: Optional[LegacyRxCallback] = None
+        self._observation_callbacks = []
         self._tx_selector: Optional[TxSelector] = None
         self._tx_selector_takes_rx = False
         self.topology = None
         self.comparison = None
+        self.logical_receiver = None
         self._network_tx_seen = OrderedDict()
         self.network_tx_duplicates = 0
         self.network_tx_capacity_drops = 0
@@ -182,8 +184,13 @@ class RFFabric:
         missing = set(topology.members) - set(self._radios)
         if set(self._radios) - set(topology.members) or any(not topology.is_shadow(rid) for rid in missing):
             raise ValueError("Topology must describe all radios and have both transmitters")
+        from .logical_receiver import LogicalReceiver
+        logical_receiver = LogicalReceiver(topology)
+        if self.logical_receiver is not None:
+            self.logical_receiver.close(require_unsubscribed=True)
         self.topology = topology
         self.comparison = ReceptionComparison(topology)
+        self.logical_receiver = logical_receiver
 
     def set_default_radio(self, radio_id: str) -> None:
         if radio_id not in self._radios:
@@ -206,6 +213,15 @@ class RFFabric:
     # ------------------------------------------------------------------
     # Callbacks / arming
     # ------------------------------------------------------------------
+
+    def add_observation_callback(self, callback):
+        """Synchronous nonblocking physical RX observation, including shadows."""
+        if callback not in self._observation_callbacks:
+            self._observation_callbacks.append(callback)
+
+    def remove_observation_callback(self, callback):
+        if callback in self._observation_callbacks:
+            self._observation_callbacks.remove(callback)
 
     def set_ingress_callback(self, callback: Optional[Callable[[RFIngress], Any]]) -> None:
         """Receive each fabric ingress (typically one RadioReception)."""
@@ -265,6 +281,15 @@ class RFFabric:
 
         return _handler
 
+    def _notify_observation(self, data, rssi, snr, radio_id, own_tx_match):
+        # Synchronous observation edge never admits packets to routing.
+        for callback in tuple(self._observation_callbacks):
+            try:
+                callback(bytes(data), rssi, snr, rx_radio_id=radio_id,
+                         own_tx_match=bool(own_tx_match))
+            except Exception:
+                logger.exception("Physical RX observer failed")
+
     def _on_radio_rx(
         self,
         radio_id: str,
@@ -273,17 +298,23 @@ class RFFabric:
         snr: Optional[float] = None,
     ) -> None:
         """Convert one radio callback into one RFIngress + one legacy fire."""
+        own_tx_match = False
         if self.topology:
             from ..protocol.packet import Packet
             try:
                 packet = Packet()
                 packet.read_from(data)
-                self.comparison.receive(radio_id, packet.calculate_packet_hash().hex(), hashlib.sha256(data).digest())
+                own_tx_match = self.comparison.receive(radio_id, packet.calculate_packet_hash().hex(), hashlib.sha256(data).digest())
             except Exception:
-                # Malformed frames never enter forwarding or the comparison denominator.
+                # Observers count malformed drops, without admitting routing.
+                self._notify_observation(data, rssi, snr, radio_id, False)
                 return
-            if self.topology.is_shadow(radio_id):
-                return
+        self._notify_observation(data, rssi, snr, radio_id, own_tx_match)
+        if self.logical_receiver is not None:
+            self.logical_receiver.observe(data, rssi, snr, rx_radio_id=radio_id,
+                                          own_tx_match=own_tx_match)
+        if self.topology and self.topology.is_shadow(radio_id):
+            return
         reception = RadioReception(
             data=data,
             rssi=rssi,
