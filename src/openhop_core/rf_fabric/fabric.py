@@ -86,6 +86,7 @@ class RFFabric:
         self._ingress_callback: Optional[Callable[[RFIngress], Any]] = None
         self._legacy_rx_callback: Optional[LegacyRxCallback] = None
         self._observation_callbacks = []
+        self._rx_bindings = {}
         self._tx_selector: Optional[TxSelector] = None
         self._tx_selector_takes_rx = False
         self.topology = None
@@ -251,14 +252,23 @@ class RFFabric:
                 type(radio).__name__,
             )
             return
-        radio.set_rx_callback(self._make_rx_handler(radio_id))
+        callback = self._make_rx_handler(radio_id)
+        radio.set_rx_callback(callback)
+        self._rx_bindings[radio_id] = callback
         logger.debug(
             "RFFabric armed on radio_id=%s (%s)",
             radio_id,
             type(radio).__name__,
         )
 
+    def has_rx_binding(self, radio_id: str) -> bool:
+        """Whether the armed physical callback still belongs to this fabric."""
+        callback = self._rx_bindings.get(radio_id)
+        return (self._armed and callback is not None
+                and getattr(self._radios.get(radio_id), "rx_callback", None) is callback)
+
     def _unbind_one(self, radio_id: str, radio: Any = None) -> None:
+        self._rx_bindings.pop(radio_id, None)
         target = radio if radio is not None else self._radios.get(radio_id)
         if target is None or not hasattr(target, "set_rx_callback"):
             return

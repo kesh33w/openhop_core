@@ -33,6 +33,8 @@ Usage:
 import asyncio
 import logging
 import random
+from .rx_receipts import RxReceiptFence
+
 import socket
 import struct
 import threading
@@ -154,6 +156,7 @@ class TCPLoRaRadio(_RadioBase):
         self._initialized = False
         self._rx_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
+        self._rx_receipts = RxReceiptFence()
         self._event_loop: Optional[asyncio.AbstractEventLoop] = None
         # Serialize command/response transactions. Multiple callers can wait
         # for the same response command (notably consecutive CAD updates), and
@@ -628,6 +631,7 @@ class TCPLoRaRadio(_RadioBase):
     # ══════════════════════════════════════════════════════════
 
     def _close_sock(self):
+        self._rx_receipts.invalidate()
         if self._sock is not None:
             try:
                 self._sock.close()
@@ -851,12 +855,31 @@ class TCPLoRaRadio(_RadioBase):
                 return True
         return False
 
+    @property
+    def rx_receipt_available(self):
+        return bool(self._initialized and self._sock is not None and not self._stop_event.is_set()
+                    and self._rx_thread and self._rx_thread.is_alive())
+
+    @property
+    def rx_receipt_generation(self):
+        return self._rx_receipts.generation
+
+    async def rx_receipt_barrier(self):
+        """Wait for a marker ordered after already-read frames; never transmits."""
+        if not self.rx_receipt_available:
+            raise RuntimeError("Reader unavailable")
+        generation = await self._rx_receipts.wait()
+        if not self.rx_receipt_available or self.rx_receipt_generation != generation:
+            raise RuntimeError("Reader changed during barrier")
+        return generation
+
     def _rx_worker(self):
         """Background thread: reads socket, dispatches RX packets and responses."""
         logger.debug("RX worker thread started")
         buf = bytearray()
 
         while not self._stop_event.is_set():
+            self._rx_receipts.checkpoint()
             try:
                 if self._sock is None:
                     # Deferred-connect mode: begin() couldn't reach the
@@ -899,9 +922,11 @@ class TCPLoRaRadio(_RadioBase):
                 while len(buf) >= 6:
                     sync_idx = buf.find(PROTO_SYNC)
                     if sync_idx < 0:
+                        self._rx_receipts.invalidate()
                         buf.clear()
                         break
                     if sync_idx > 0:
+                        self._rx_receipts.invalidate()
                         buf = buf[sync_idx:]
 
                     if len(buf) < 4:
@@ -915,6 +940,7 @@ class TCPLoRaRadio(_RadioBase):
                     # Drop the SYNC byte we just consumed and resync rather
                     # than waiting indefinitely for a phantom 64 KB frame.
                     if length > MAX_LORA_PAYLOAD + 32:
+                        self._rx_receipts.invalidate()
                         logger.warning(
                             f"RX frame LEN={length} exceeds sanity bound — "
                             f"dropping SYNC byte and resyncing"
@@ -934,22 +960,32 @@ class TCPLoRaRadio(_RadioBase):
                     buf = buf[frame_size:]
 
                     if crc_recv != crc_comp:
+                        self._rx_receipts.invalidate()
                         logger.warning(f"RX CRC mismatch, cmd=0x{cmd:02X}, dropping")
                         continue
 
                     self._dispatch_frame(cmd, payload)
 
             except Exception as e:
+                self._rx_receipts.invalidate()
                 logger.error(f"RX worker error: {e}")
                 time.sleep(0.1)
 
         logger.debug("RX worker thread exiting")
+
+    def _deliver_rx_receipt(self, callback, data):
+        try:
+            callback(data)
+        except Exception:
+            self._rx_receipts.invalidate()
+            raise
 
     def _dispatch_frame(self, cmd: int, payload: bytes):
         """Route a received frame."""
 
         if cmd == CMD_RX_PACKET:
             if len(payload) < 6:
+                self._rx_receipts.invalidate()
                 logger.warning(f"RX_PACKET too short: {len(payload)}B")
                 return
 
@@ -973,13 +1009,16 @@ class TCPLoRaRadio(_RadioBase):
                         pass
 
                 if self._event_loop and self._event_loop.is_running():
-                    self._event_loop.call_soon_threadsafe(self.rx_callback, lora_data)
+                    self._event_loop.call_soon_threadsafe(self._deliver_rx_receipt, self.rx_callback, lora_data)
                 else:
+                    self._rx_receipts.invalidate()
                     try:
                         self.rx_callback(lora_data)
                     except Exception as e:
+                        self._rx_receipts.invalidate()
                         logger.error(f"RX callback error: {e}")
             else:
+                self._rx_receipts.invalidate()
                 logger.warning("RX packet but no callback registered")
 
         elif cmd == CMD_ERROR:

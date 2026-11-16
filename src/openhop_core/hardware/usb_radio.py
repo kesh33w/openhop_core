@@ -32,6 +32,8 @@ import asyncio
 import inspect
 import logging
 import os
+from .rx_receipts import RxReceiptFence
+
 import queue
 import random
 import struct
@@ -174,6 +176,7 @@ class USBLoRaRadio(_RadioBase):
         self._initialized = False
         self._rx_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
+        self._rx_receipts = RxReceiptFence()
         self._connected_event = threading.Event()
         self._event_loop: Optional[asyncio.AbstractEventLoop] = None
         self._port_identity: Optional[tuple[Optional[int], Optional[int], Optional[str]]] = None
@@ -897,6 +900,7 @@ class USBLoRaRadio(_RadioBase):
         with self._response_lock:
             if generation is not None and generation != self._generation:
                 return
+            self._rx_receipts.invalidate()
             self._generation += 1
             self._connected_event.clear()
             self._reconnect_requested.set()
@@ -1044,6 +1048,7 @@ class USBLoRaRadio(_RadioBase):
                 attempt += 1
                 try:
                     with self._response_lock:
+                        self._rx_receipts.invalidate()
                         self._generation += 1
                     self._serial = self._open_serial_sync()
                     if self._stop_event.wait(0.3):
@@ -1224,12 +1229,31 @@ class USBLoRaRadio(_RadioBase):
 
     # ── RX background thread ─────────────────────────────────
 
+    @property
+    def rx_receipt_available(self):
+        return bool(self._initialized and self._connected_event.is_set() and not self._stop_event.is_set()
+                    and self._rx_thread and self._rx_thread.is_alive())
+
+    @property
+    def rx_receipt_generation(self):
+        return self._rx_receipts.generation
+
+    async def rx_receipt_barrier(self):
+        """Wait for a marker ordered after already-read frames; never transmits."""
+        if not self.rx_receipt_available:
+            raise RuntimeError("Reader unavailable")
+        generation = await self._rx_receipts.wait()
+        if not self.rx_receipt_available or self.rx_receipt_generation != generation:
+            raise RuntimeError("Reader changed during barrier")
+        return generation
+
     def _rx_worker(self):
         """Background thread: reads serial, dispatches RX packets and command responses."""
         logger.debug("RX worker thread started")
         buf = bytearray()
 
         while not self._stop_event.is_set():
+            self._rx_receipts.checkpoint()
             try:
                 if self._reconnect_requested.is_set():
                     buf.clear()
@@ -1255,9 +1279,11 @@ class USBLoRaRadio(_RadioBase):
                     # Find sync
                     sync_idx = buf.find(PROTO_SYNC)
                     if sync_idx < 0:
+                        self._rx_receipts.invalidate()
                         buf.clear()
                         break
                     if sync_idx > 0:
+                        self._rx_receipts.invalidate()
                         buf = buf[sync_idx:]
 
                     if len(buf) < 4:
@@ -1271,6 +1297,7 @@ class USBLoRaRadio(_RadioBase):
                     # Drop the SYNC byte we just consumed and resync rather
                     # than waiting indefinitely for a phantom 64 KB frame.
                     if length > MAX_LORA_PAYLOAD + 32:
+                        self._rx_receipts.invalidate()
                         logger.warning(
                             f"RX frame LEN={length} exceeds sanity bound — "
                             f"dropping SYNC byte and resyncing"
@@ -1292,6 +1319,7 @@ class USBLoRaRadio(_RadioBase):
                     buf = buf[frame_size:]
 
                     if crc_recv != crc_comp:
+                        self._rx_receipts.invalidate()
                         logger.warning(f"RX CRC mismatch, cmd=0x{cmd:02X}, dropping")
                         continue
 
@@ -1304,6 +1332,7 @@ class USBLoRaRadio(_RadioBase):
                 if not self._reconnect_serial_sync():
                     break
             except Exception as e:
+                self._rx_receipts.invalidate()
                 logger.error(f"RX worker error: {e}")
                 time.sleep(0.1)
 
@@ -1312,18 +1341,26 @@ class USBLoRaRadio(_RadioBase):
 
     def _deliver_rx_current(self, generation, callback, data, rssi, snr):
         if generation == self._generation and not self._stop_event.is_set():
-            _deliver_rx_packet(callback, data, rssi, snr)
+            try:
+                _deliver_rx_packet(callback, data, rssi, snr)
+            except Exception:
+                self._rx_receipts.invalidate()
+                raise
+        else:
+            self._rx_receipts.invalidate()
 
     def _dispatch_frame(self, cmd: int, payload: bytes, generation=None):
         """Route only frames from the current serial session."""
         if generation is None:
             generation = self._generation
         if generation != self._generation or self._stop_event.is_set():
+            self._rx_receipts.invalidate()
             return
 
         if cmd == CMD_RX_PACKET:
             # ── LoRa packet received ─────────────────────────
             if len(payload) < 6:
+                self._rx_receipts.invalidate()
                 logger.warning(f"RX_PACKET too short: {len(payload)}B")
                 return
 
@@ -1354,8 +1391,10 @@ class USBLoRaRadio(_RadioBase):
                         self._deliver_rx_current, generation, callback, lora_data, rssi, snr
                     )
                 else:
+                    self._rx_receipts.invalidate()
                     logger.warning("RX packet but event loop not running — dropping")
             else:
+                self._rx_receipts.invalidate()
                 logger.warning("RX packet but no callback registered")
 
         elif cmd == CMD_ERROR:
