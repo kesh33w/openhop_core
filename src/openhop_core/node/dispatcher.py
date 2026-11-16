@@ -1440,7 +1440,8 @@ class Dispatcher:
         )
         if unsupported_outcome or tx_metadata is False or (
             isinstance(tx_metadata, dict)
-            and (tx_metadata.get("ok") is False or tx_metadata.get("tx_outcome_uncertain"))
+            and (tx_metadata.get("ok") is False or tx_metadata.get("tx_outcome_uncertain")
+                 or tx_metadata.get("suppressed"))
         ):
             packet._tx_metadata = {
                 "radio_id": tx_radio_id,
@@ -1448,7 +1449,9 @@ class Dispatcher:
                 **(tx_metadata if isinstance(tx_metadata, dict) else {}),
             }
             radio_label = f" radio={tx_radio_id}" if tx_radio_id else ""
-            self._log(f"Radio transmit returned no confirmation metadata{radio_label}")
+            reason = packet._tx_metadata.get("reason", "no confirmation metadata")
+            outcome = "suppressed" if packet._tx_metadata.get("suppressed") else "not confirmed"
+            self._log(f"Radio transmit {outcome}{radio_label}: {reason}")
             self.state = DispatcherState.IDLE
             return (False, None, None)
         # Spend the airtime budget on the completed transmit (client-repeat only).

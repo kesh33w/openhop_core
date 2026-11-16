@@ -453,10 +453,13 @@ class RFFabric:
                 claim = (self.topology.network(rid), packet.calculate_packet_hash().hex())
                 if claim in self._network_tx_seen:
                     self.network_tx_duplicates += 1
-                    return {'ok': False, 'radio_id': rid, 'reason': 'destination duplicate'}
+                    return {'ok': False, 'radio_id': rid, 'reason': 'destination duplicate',
+                            'suppressed': True, 'retryable': False, 'preserve_tx_claim': True,
+                            'tx_outcome_uncertain': False, 'airtime_ms': 0.0}
                 if len(self._network_tx_seen) >= 10000:
                     self.network_tx_capacity_drops += 1
-                    return {'ok': False, 'radio_id': rid, 'reason': 'destination cache full'}
+                    return {'ok': False, 'radio_id': rid, 'reason': 'destination cache full',
+                            'retryable': False, 'tx_outcome_uncertain': False, 'airtime_ms': 0.0}
                 # Claim synchronously before any await, including concurrent sends.
                 self._network_tx_seen[claim] = now
         if self.comparison:
