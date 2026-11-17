@@ -41,6 +41,8 @@ import threading
 import time
 from typing import Callable, Optional
 
+from .cad_control import CadControlMixin
+
 from .protocol_constants import (
     CMD_AUTH,
     CMD_AUTH_OK,
@@ -97,7 +99,7 @@ else:
         pass
 
 
-class TCPLoRaRadio(_RadioBase):
+class TCPLoRaRadio(CadControlMixin, _RadioBase):
     """TCP LoRa Radio — openhop_core LoRaRadio interface over Wi-Fi/TCP.
 
     Communicates with an openHop Modem in Wi-Fi STA mode. Provides the
@@ -122,6 +124,7 @@ class TCPLoRaRadio(_RadioBase):
         lbt_max_wait_seconds: float = 4.0,
         lbt_retry_interval_ms: int = 200,
         connect_timeout: float = 5.0,
+        cad_enabled: Optional[bool] = None,
     ):
         self.host = host
         self.port = port
@@ -142,7 +145,7 @@ class TCPLoRaRadio(_RadioBase):
         # neighbours forcing their TX in lockstep. Defaults match MeshCore
         # (4 s cap, 200 ms retry); the jitter keeps two nodes decorrelated.
         # lbt_max_attempts is accepted for call-site compatibility only.
-        self.lbt_enabled = lbt_enabled
+        self._init_cad_control(cad_enabled, lbt_enabled)
         self.lbt_max_attempts = lbt_max_attempts
         self.lbt_max_wait_seconds = max(0.5, float(lbt_max_wait_seconds))
         self.lbt_retry_interval_ms = max(20, int(lbt_retry_interval_ms))
@@ -738,8 +741,21 @@ class TCPLoRaRadio(_RadioBase):
         logger.error("No CAD configuration response from modem")
         return False
 
+    def _write_cad_mode_sync(self) -> bool:
+        self._sock_write(build_frame(0x4A, b"\x00"))
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            response = self._read_frame_sync(timeout=max(0.1, deadline - time.monotonic()))
+            if response and response[0] == 0x4B:
+                return response[1] == b"\x00"
+            if response and response[0] == CMD_ERROR:
+                return False
+        return False
+
     def _apply_cad_config_sync(self) -> bool:
         """Restore cached CAD settings during initial connect or reconnect."""
+        if not self._restore_cad_mode_sync():
+            return False
         if self._custom_cad_peak is None or self._custom_cad_min is None:
             return True
         payload = build_cad_params_payload(
