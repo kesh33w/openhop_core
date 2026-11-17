@@ -106,14 +106,16 @@ async def test_both_legs_once_same_bytes_one_network_claim():
 
 
 @pytest.mark.asyncio
-async def test_cad_unknown_or_on_rejects_before_any_leg():
+async def test_cad_setting_does_not_gate_or_change_ordered_group():
     f, radios, data = setup()
     radios["bay"]._cad_mode_explicit = None
-    with pytest.raises(ValueError, match="CAD OFF"):
-        with f.ordered_tx_group("bay"):
-            await f.send(data, radio_id="rak")
-    assert not radios["rak"].sent
-    assert not radios["bay"].sent
+    radios["rak"].lbt_enabled = True
+    with f.ordered_tx_group("bay"):
+        await f.send(data, radio_id="rak")
+        await f.send(data, radio_id="bay")
+    assert radios["rak"].sent == radios["bay"].sent == [data]
+    assert radios["bay"]._cad_mode_explicit is None
+    assert radios["rak"].lbt_enabled is True
 
 
 @pytest.mark.asyncio
@@ -163,7 +165,7 @@ async def test_changed_bytes_and_scope_escape_rejected():
 
 
 @pytest.mark.asyncio
-async def test_definitely_unsent_leg_retry_allowed_and_recheck_cad():
+async def test_definitely_unsent_leg_retry_preserves_cad():
     f, radios, data = setup()
     radios["rak"].result = {"ok": False, "tx_outcome_uncertain": False}
     with f.ordered_tx_group("bay"):
@@ -171,10 +173,10 @@ async def test_definitely_unsent_leg_retry_allowed_and_recheck_cad():
         radios["rak"].result = True
         assert (await f.send(data, radio_id="rak"))["ok"]
         radios["bay"].lbt_enabled = True
-        with pytest.raises(ValueError, match="CAD OFF"):
-            await f.send(data, radio_id="bay")
+        assert (await f.send(data, radio_id="bay"))["ok"]
     assert len(radios["rak"].sent) == 2
-    assert not radios["bay"].sent
+    assert radios["bay"].sent == [data]
+    assert radios["bay"].lbt_enabled is True
 
 
 @pytest.mark.asyncio

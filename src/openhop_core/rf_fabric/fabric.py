@@ -382,10 +382,10 @@ class RFFabric:
 
     @contextmanager
     def ordered_tx_group(self, logical_primary):
-        """Authorize one bounded ordered group, with all CAD modes confirmed OFF.
+        """Authorize one bounded ordered group, independent of CAD configuration.
 
-        The caller awaits each scheduled leg inside this scope. No hardware
-        settings are changed here. A missing/unknown CAD state rejects the group.
+        The caller awaits each scheduled leg inside this scope. Existing CAD,
+        LBT and power settings are neither constrained nor changed here.
         """
         if self._ordered_tx.get() is not None:
             raise ValueError("Nested ordered TX groups are forbidden")
@@ -394,7 +394,6 @@ class RFFabric:
         targets = self.topology.tx_targets(logical_primary)
         if len(targets) < 2:
             raise ValueError("No ordered TX group configured")
-        self._check_group_cad(targets)
         group = OrderedTxContext(logical_primary, targets, time.monotonic() + 300)
         token = self._ordered_tx.set(group)
         try:
@@ -404,13 +403,6 @@ class RFFabric:
             if group.claimed and not group.preserve_claim and group.claim is not None:
                 self._network_tx_seen.pop(group.claim, None)
             self._ordered_tx.reset(token)
-
-    def _check_group_cad(self, targets):
-        for rid in targets:
-            radio = self._radios.get(rid)
-            if (radio is None or getattr(radio, "_cad_mode_explicit", None) is not False
-                    or getattr(radio, "lbt_enabled", None) is not False):
-                raise ValueError(f"Ordered TX requires confirmed CAD OFF on {rid}")
 
     def resolve_tx_radio_id(
         self,
@@ -489,7 +481,6 @@ class RFFabric:
         claim = None
         group = self._ordered_tx.get()
         if group is not None:
-            self._check_group_cad(group.targets)
             group.begin(rid, data)
         if self.topology:
             from ..protocol.packet import Packet
