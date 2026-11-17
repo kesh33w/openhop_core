@@ -11,6 +11,9 @@ import inspect
 import hashlib
 import logging
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
+from .ordered_tx import OrderedTxContext
 from collections import OrderedDict
 from typing import Any, Awaitable, Callable, Optional, Union
 
@@ -93,6 +96,7 @@ class RFFabric:
         self.comparison = None
         self.logical_receiver = None
         self._network_tx_seen = OrderedDict()
+        self._ordered_tx = ContextVar("ordered_tx_group", default=None)
         self.network_tx_duplicates = 0
         self.network_tx_capacity_drops = 0
         self._armed = False
@@ -376,6 +380,38 @@ class RFFabric:
     # TX
     # ------------------------------------------------------------------
 
+    @contextmanager
+    def ordered_tx_group(self, logical_primary):
+        """Authorize one bounded ordered group, with all CAD modes confirmed OFF.
+
+        The caller awaits each scheduled leg inside this scope. No hardware
+        settings are changed here. A missing/unknown CAD state rejects the group.
+        """
+        if self._ordered_tx.get() is not None:
+            raise ValueError("Nested ordered TX groups are forbidden")
+        if self.topology is None:
+            raise ValueError("Ordered TX requires explicit topology")
+        targets = self.topology.tx_targets(logical_primary)
+        if len(targets) < 2:
+            raise ValueError("No ordered TX group configured")
+        self._check_group_cad(targets)
+        group = OrderedTxContext(logical_primary, targets, time.monotonic() + 300)
+        token = self._ordered_tx.set(group)
+        try:
+            yield group
+        finally:
+            group.active = False
+            if group.claimed and not group.preserve_claim and group.claim is not None:
+                self._network_tx_seen.pop(group.claim, None)
+            self._ordered_tx.reset(token)
+
+    def _check_group_cad(self, targets):
+        for rid in targets:
+            radio = self._radios.get(rid)
+            if (radio is None or getattr(radio, "_cad_mode_explicit", None) is not False
+                    or getattr(radio, "lbt_enabled", None) is not False):
+                raise ValueError(f"Ordered TX requires confirmed CAD OFF on {rid}")
+
     def resolve_tx_radio_id(
         self,
         data: bytes,
@@ -403,7 +439,11 @@ class RFFabric:
                     if not destinations:
                         raise ValueError("Shadow receivers cannot cause TX")
                     radio_id = destinations[0]
-            self.topology.check_tx(radio_id, rx_radio_id, reply_to_radio_id=reply_to_radio_id)
+            group = self._ordered_tx.get()
+            if group is not None:
+                group.validate(radio_id)
+            self.topology.check_tx(radio_id, rx_radio_id, reply_to_radio_id=reply_to_radio_id,
+                                   group_primary=group.primary if group else None)
         if radio_id is not None:
             if radio_id not in self._radios:
                 raise KeyError(f"Unknown radio_id={radio_id!r}")
@@ -447,6 +487,10 @@ class RFFabric:
             raise RuntimeError(f"Radio {rid!r} ({type(radio).__name__}) does not support send()")
         network = None
         claim = None
+        group = self._ordered_tx.get()
+        if group is not None:
+            self._check_group_cad(group.targets)
+            group.begin(rid, data)
         if self.topology:
             from ..protocol.packet import Packet
             from ..protocol.constants import PAYLOAD_TYPE_ACK, PAYLOAD_TYPE_MULTIPART
@@ -461,17 +505,26 @@ class RFFabric:
                 while self._network_tx_seen and now - next(iter(self._network_tx_seen.values())) > 300:
                     self._network_tx_seen.popitem(last=False)
                 claim = (self.topology.network(rid), packet.calculate_packet_hash().hex())
-                if claim in self._network_tx_seen:
+                if claim in self._network_tx_seen and not (group and group.claimed and group.claim == claim):
                     self.network_tx_duplicates += 1
+                    if group:
+                        group.inflight = False
+                        group.aborted = True
                     return {'ok': False, 'radio_id': rid, 'reason': 'destination duplicate',
                             'suppressed': True, 'retryable': False, 'preserve_tx_claim': True,
                             'tx_outcome_uncertain': False, 'airtime_ms': 0.0}
-                if len(self._network_tx_seen) >= 10000:
+                if claim not in self._network_tx_seen and len(self._network_tx_seen) >= 10000:
                     self.network_tx_capacity_drops += 1
+                    if group:
+                        group.inflight = False
+                        group.aborted = True
                     return {'ok': False, 'radio_id': rid, 'reason': 'destination cache full',
                             'retryable': False, 'tx_outcome_uncertain': False, 'airtime_ms': 0.0}
                 # Claim synchronously before any await, including concurrent sends.
                 self._network_tx_seen[claim] = now
+                if group:
+                    group.claim = claim
+                    group.claimed = True
         if self.comparison:
             from ..protocol.packet import Packet
             packet = Packet()
@@ -487,7 +540,9 @@ class RFFabric:
         finally:
             failed = result is False or (isinstance(result, dict) and result.get('ok') is False
                                          and not result.get('tx_outcome_uncertain'))
-            if failed and claim is not None:
+            if group:
+                group.finish(rid, result, send_exception)
+            if failed and claim is not None and group is None:
                 self._network_tx_seen.pop(claim, None)
             if network is not None:
                 self.comparison.end_tx(

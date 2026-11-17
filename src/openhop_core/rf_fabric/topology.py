@@ -15,6 +15,7 @@ class NetworkTopology:
             "networks",
             "enable_receiver_forwarding",
             "repeat_receiver_on_network",
+            "tx_groups",
         }:
             raise ValueError("Invalid fabric.topology fields")
         self.networks = settings.get("networks")
@@ -42,10 +43,26 @@ class NetworkTopology:
         for name, rid in self.networks.items():
             if self.members.get(rid) != (name, "transceiver"):
                 raise ValueError("Each network TX must name its transceiver")
-        if set(
-            r for r, (_, role) in self.members.items() if role == "transceiver"
-        ) != set(self.networks.values()):
-            raise ValueError("Exactly one transceiver is allowed per network")
+        groups = settings.get("tx_groups", {})
+        if not isinstance(groups, dict):
+            raise ValueError("tx_groups must map logical primary IDs to ordered radio lists")
+        self.tx_groups = {}
+        for primary, targets in groups.items():
+            if primary not in self.networks.values():
+                raise ValueError("TX group must name a logical network primary")
+            if (not isinstance(targets, (list, tuple)) or not targets
+                    or any(not isinstance(rid, str) for rid in targets)
+                    or len(set(targets)) != len(targets) or primary not in targets):
+                raise ValueError("TX group must contain unique radio IDs including its primary")
+            network = self.members[primary][0]
+            if any(self.members.get(rid) != (network, "transceiver") for rid in targets):
+                raise ValueError("TX group members must be transceivers on the same network")
+            self.tx_groups[primary] = tuple(targets)
+        permitted = set(self.networks.values())
+        for targets in self.tx_groups.values():
+            permitted.update(targets)
+        if {r for r, (_, role) in self.members.items() if role == "transceiver"} != permitted:
+            raise ValueError("Extra transceivers require an explicit TX group")
         if default_radio not in self.networks.values():
             raise ValueError("Default radio must be a designated network transmitter")
         self.default_radio = default_radio
@@ -113,7 +130,17 @@ class NetworkTopology:
             raise ValueError("Shadow receivers cannot cause replies")
         return self.home(request_radio)
 
-    def check_tx(self, target, ingress=None, *, reply_to_radio_id=None):
+    def tx_targets(self, logical_primary):
+        """Ordered opt-in physical egresses; logical routing identity is unchanged."""
+        if logical_primary not in self.networks.values():
+            raise ValueError("TX expansion requires a logical network primary")
+        return self.tx_groups.get(logical_primary, (logical_primary,))
+
+    def check_tx(self, target, ingress=None, *, reply_to_radio_id=None, group_primary=None):
+        if group_primary is not None:
+            if target not in self.tx_targets(group_primary):
+                raise ValueError("Physical target is not a member of the active TX group")
+            target = group_primary
         if target not in self.networks.values():
             raise ValueError("TX is forbidden on a receive-only radio")
         if reply_to_radio_id is not None:
