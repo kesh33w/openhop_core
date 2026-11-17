@@ -55,13 +55,13 @@ class NetworkTopology:
                     or len(set(targets)) != len(targets) or primary not in targets):
                 raise ValueError("TX group must contain unique radio IDs including its primary")
             network = self.members[primary][0]
-            if any(self.members.get(rid) != (network, "transceiver") for rid in targets):
-                raise ValueError("TX group members must be transceivers on the same network")
+            if any(rid not in self.members or self.members[rid][0] != network for rid in targets):
+                raise ValueError("TX group members must belong to the same network")
             self.tx_groups[primary] = tuple(targets)
         permitted = set(self.networks.values())
         for targets in self.tx_groups.values():
             permitted.update(targets)
-        if {r for r, (_, role) in self.members.items() if role == "transceiver"} != permitted:
+        if not {r for r, (_, role) in self.members.items() if role == "transceiver"}.issubset(permitted):
             raise ValueError("Extra transceivers require an explicit TX group")
         if default_radio not in self.networks.values():
             raise ValueError("Default radio must be a designated network transmitter")

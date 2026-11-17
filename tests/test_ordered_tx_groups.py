@@ -71,8 +71,22 @@ def test_invalid_groups(order):
 def test_extra_transceiver_requires_opt_in():
     with pytest.raises(ValueError):
         topology()
+
+
+@pytest.mark.parametrize("role", ["shadow", "receiver"])
+def test_group_secondary_keeps_receive_role_and_routing(role):
+    entries = [dict(id="smf", network="SMF", role="transceiver"),
+               dict(id="bay", network="SFO", role="transceiver"),
+               dict(id="rak", network="SFO", role=role)]
+    base = {"networks": {"SMF": "smf", "SFO": "bay"}, "enable_receiver_forwarding": True}
+    before = NetworkTopology(entries, base, "smf")
+    after = NetworkTopology(entries, {**base, "tx_groups": {"bay": ["rak", "bay"]}}, "smf")
+    assert before.members == after.members
+    assert before.destinations("rak") == after.destinations("rak")
+    assert before.relay_destinations("rak") == after.relay_destinations("rak")
     with pytest.raises(ValueError):
-        topology(["rak", "bay"], extra_role="shadow")
+        after.check_tx("rak")
+    after.check_tx("rak", "smf", group_primary="bay")
 
 
 @pytest.mark.asyncio
