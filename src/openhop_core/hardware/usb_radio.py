@@ -446,6 +446,7 @@ class USBLoRaRadio(CadControlMixin, _RadioBase):
                 )
 
                 if resp is not None:
+                    tx_completed_at = time.time()
                     self._tx_count += 1
 
                     # Parse airtime from TX_DONE payload (uint32 LE, microseconds)
@@ -466,6 +467,7 @@ class USBLoRaRadio(CadControlMixin, _RadioBase):
 
                     return {
                         "ok": True,  # CMD_TX_DONE received: modem completed this leg.
+                        "tx_completed_at": tx_completed_at,
                         "airtime_ms": airtime_ms,
                         "lbt_attempts": len(lbt_backoff_delays),
                         "lbt_backoff_delays_ms": lbt_backoff_delays,

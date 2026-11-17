@@ -20,6 +20,7 @@ async def test_tx_done_allows_next_leg(radio):
     ctx.begin("first", b"packet")
     result = await radio.send(b"packet")
     assert result["ok"] is True
+    assert abs(result["tx_completed_at"] - time.time()) < 2
     first = radio._send_command.await_args_list[0]
     assert first.args[0] == CMD_TX_REQUEST
     assert first.kwargs["expect_cmd"] == CMD_TX_DONE
