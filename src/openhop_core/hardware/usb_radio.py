@@ -465,6 +465,7 @@ class USBLoRaRadio(CadControlMixin, _RadioBase):
                     )
 
                     return {
+                        "ok": True,  # CMD_TX_DONE received: modem completed this leg.
                         "airtime_ms": airtime_ms,
                         "lbt_attempts": len(lbt_backoff_delays),
                         "lbt_backoff_delays_ms": lbt_backoff_delays,
