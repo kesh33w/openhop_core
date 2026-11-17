@@ -64,3 +64,12 @@ def test_explicit_mode_requires_reconnect_ack(radio):
 def test_boolean_only(radio,value):
     with pytest.raises(ValueError):
         asyncio.run(radio.set_cad_enabled(value))
+
+@pytest.mark.parametrize('kind', [USBLoRaRadio, TCPLoRaRadio])
+def test_persisted_off_initializes_and_restores(kind):
+    kwargs = {'host': 'modem.invalid'} if kind is TCPLoRaRadio else {}
+    radio = kind(cad_enabled=False, **kwargs)
+    assert radio.lbt_enabled is False
+    radio._write_cad_mode_sync = Mock(return_value=True)
+    assert radio._restore_cad_mode_sync()
+    radio._write_cad_mode_sync.assert_called_once()
