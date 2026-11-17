@@ -146,3 +146,39 @@ async def test_changed_bytes_and_scope_escape_rejected():
     release.set()
     await task
     assert not radios["bay"].sent
+
+
+@pytest.mark.asyncio
+async def test_definitely_unsent_leg_retry_allowed_and_recheck_cad():
+    f, radios, data = setup()
+    radios["rak"].result = {"ok": False, "tx_outcome_uncertain": False}
+    with f.ordered_tx_group("bay"):
+        assert not (await f.send(data, radio_id="rak"))["ok"]
+        radios["rak"].result = True
+        assert (await f.send(data, radio_id="rak"))["ok"]
+        radios["bay"].lbt_enabled = True
+        with pytest.raises(ValueError, match="CAD OFF"):
+            await f.send(data, radio_id="bay")
+    assert len(radios["rak"].sent) == 2
+    assert not radios["bay"].sent
+
+
+@pytest.mark.asyncio
+async def test_scope_blocks_overlap_and_expiry():
+    f, radios, data = setup()
+    started, release = asyncio.Event(), asyncio.Event()
+    async def wait_send(data):
+        started.set()
+        await release.wait()
+        return True
+    radios["rak"].send = wait_send
+    with f.ordered_tx_group("bay") as group:
+        task = asyncio.create_task(f.send(data, radio_id="rak"))
+        await started.wait()
+        with pytest.raises(ValueError, match="in flight"):
+            await f.send(data, radio_id="bay")
+        release.set()
+        await task
+        group.deadline = 0
+        with pytest.raises(ValueError, match="expired"):
+            await f.send(data, radio_id="bay")
