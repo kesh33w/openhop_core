@@ -1,7 +1,8 @@
 """Task-local permission for intentional physical copies of one logical TX.
 
 Never disables global packet deduplication. The context has a finite lifetime,
-accepts exactly one byte string, and cannot be reused by a detached child task.
+accepts one byte string or explicitly declared final-hop flood variants, and
+cannot be reused by a detached child task.
 """
 from dataclasses import dataclass, field
 import time
@@ -12,6 +13,7 @@ class OrderedTxContext:
     primary: str
     targets: tuple
     deadline: float
+    expected_frames: dict | None = None
     active: bool = True
     data: bytes | None = None
     claim: tuple | None = None
@@ -20,6 +22,26 @@ class OrderedTxContext:
     aborted: bool = False
     inflight: bool = False
     completed: set = field(default_factory=set)
+
+    def __post_init__(self):
+        if self.expected_frames is None:
+            return
+        from ..protocol.packet import Packet
+        from ..protocol.constants import PAYLOAD_TYPE_TRACE
+        if set(self.expected_frames) != set(self.targets):
+            raise ValueError("Expected frames must cover ordered targets exactly")
+        signatures = []
+        for raw in self.expected_frames.values():
+            packet = Packet(); packet.read_from(raw)
+            width = packet.get_path_hash_size()
+            if (not packet.is_route_flood() or packet.get_payload_type() == PAYLOAD_TYPE_TRACE
+                    or len(packet.path) < width):
+                raise ValueError("Only flood final-hop variants are permitted")
+            signatures.append((packet.header, packet.path_len, bytes(packet.path[:-width]),
+                               bytes(packet.payload), tuple(packet.transport_codes)))
+        if any(sig != signatures[0] for sig in signatures[1:]):
+            raise ValueError("Ordered variants may differ only in final path hash")
+        self.expected_frames = {k: bytes(v) for k, v in self.expected_frames.items()}
 
     def validate(self, target):
         if not self.active or time.monotonic() >= self.deadline:
@@ -33,7 +55,10 @@ class OrderedTxContext:
         self.validate(target)
         if self.inflight or target in self.completed:
             raise ValueError("Ordered TX leg already sent or another leg in flight")
-        if self.data is not None and self.data != data:
+        if self.expected_frames is not None:
+            if self.expected_frames[target] != bytes(data):
+                raise ValueError("Ordered TX frame differs from declared leg")
+        elif self.data is not None and self.data != data:
             raise ValueError("Ordered TX group must send identical bytes")
         self.data = bytes(data)
         self.inflight = True

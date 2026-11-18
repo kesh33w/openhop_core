@@ -381,7 +381,7 @@ class RFFabric:
     # ------------------------------------------------------------------
 
     @contextmanager
-    def ordered_tx_group(self, logical_primary):
+    def ordered_tx_group(self, logical_primary, *, expected_frames=None):
         """Authorize one bounded ordered group, independent of CAD configuration.
 
         The caller awaits each scheduled leg inside this scope. Existing CAD,
@@ -394,7 +394,7 @@ class RFFabric:
         targets = self.topology.tx_targets(logical_primary)
         if len(targets) < 2:
             raise ValueError("No ordered TX group configured")
-        group = OrderedTxContext(logical_primary, targets, time.monotonic() + 300)
+        group = OrderedTxContext(logical_primary, targets, time.monotonic() + 300, expected_frames=expected_frames)
         token = self._ordered_tx.set(group)
         try:
             yield group
