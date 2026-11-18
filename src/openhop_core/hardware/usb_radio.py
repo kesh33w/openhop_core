@@ -265,11 +265,19 @@ class USBLoRaRadio(CadControlMixin, _RadioBase):
         remaining_ms = (deadline - time.monotonic()) * 1000.0
         return max(0.0, min(delay_ms, remaining_ms))
 
+    THREAD_EXIT_GRACE_SECONDS = 1.0
+
     def begin(self) -> bool:
         """Initialize USB serial connection and configure the modem radio."""
         if self._initialized:
             return True
         # Never reuse an instance while its previous I/O owners are exiting.
+        # cleanup() does not join them, so give an immediate cleanup(); begin()
+        # a short grace period instead of failing spuriously.
+        deadline = time.monotonic() + self.THREAD_EXIT_GRACE_SECONDS
+        for thread in (self._rx_thread, self._writer_thread):
+            if thread and thread.is_alive() and thread is not threading.current_thread():
+                thread.join(max(0.0, deadline - time.monotonic()))
         if any(t and t.is_alive() for t in (self._rx_thread, self._writer_thread)):
             return False
         self._stop_event.clear()
