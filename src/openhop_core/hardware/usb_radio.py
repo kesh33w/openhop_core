@@ -173,6 +173,8 @@ class USBLoRaRadio(CadControlMixin, _RadioBase):
         # Last CMD_ERROR code seen, so send() can tell a firmware-side
         # auto-CAD refusal (ERR_CHANNEL_BUSY) from a real TX failure.
         self._last_modem_error = None  # int error code, or None
+        self._last_command_unsent = False  # True only when a command was never submitted
+        self._cad_timeouts = 0  # consecutive CAD response timeouts
 
         # State
         self._serial: Optional[serial.Serial] = None
@@ -321,6 +323,24 @@ class USBLoRaRadio(CadControlMixin, _RadioBase):
                 self._serial.close()
             return False
 
+    @staticmethod
+    def _unsent(reason, lbt_backoff_delays):
+        """A send that definitely put nothing on air: safe to retry."""
+        return {
+            "ok": False,
+            "tx_outcome_uncertain": False,
+            "reason": reason,
+            "airtime_ms": 0.0,
+            "lbt_attempts": len(lbt_backoff_delays),
+            "lbt_backoff_delays_ms": lbt_backoff_delays,
+            "lbt_channel_busy": bool(lbt_backoff_delays),
+        }
+
+    @property
+    def is_connected(self) -> bool:
+        """True while a modem session is open; the fabric skips TX otherwise."""
+        return self._connected_event.is_set() and not self._stop_event.is_set()
+
     async def send(self, data: bytes) -> Optional[dict]:
         """Send a LoRa packet asynchronously with LBT (CAD).
 
@@ -336,7 +356,7 @@ class USBLoRaRadio(CadControlMixin, _RadioBase):
         """
         if not self._initialized:
             logger.error("Radio not initialized")
-            return None
+            return self._unsent("not_initialized", [])
 
         async with self._tx_lock:
             # Log taxonomy, shared with the SPI radio: [LBT] is the
@@ -377,18 +397,11 @@ class USBLoRaRadio(CadControlMixin, _RadioBase):
                         cad_checks += 1
                         channel_busy = await self._perform_cad(timeout=cad_timeout)
                     except Exception as e:
-                        logger.warning(f"[LBT] Channel check unavailable: {e}; not transmitting")
-                        # No TX request has been submitted. Unknown CAD is not
-                        # a clear channel, and must not authorize transmission.
-                        return {
-                            "ok": False,
-                            "tx_outcome_uncertain": False,
-                            "reason": "cad_unavailable",
-                            "airtime_ms": 0.0,
-                            "lbt_attempts": len(lbt_backoff_delays),
-                            "lbt_backoff_delays_ms": lbt_backoff_delays,
-                            "lbt_channel_busy": bool(lbt_backoff_delays),
-                        }
+                        # A missed channel check behaves like CAD off for this
+                        # packet (upstream behaviour) rather than dropping it.
+                        outcome = "cad_unavailable"
+                        logger.warning(f"[LBT] Channel check unavailable: {e}; transmitting anyway")
+                        break
                     if not channel_busy:
                         break
                     if time.monotonic() >= lbt_deadline:
@@ -413,6 +426,8 @@ class USBLoRaRadio(CadControlMixin, _RadioBase):
                         expect_cmd=CMD_TX_DONE,
                         timeout=10.0,
                     )
+                    # Read before any await: was the TX frame never handed to the link?
+                    tx_unsent = self._last_command_unsent
                     if resp is not None:
                         break
                     # Firmware-side auto-CAD (CMD_SET_AUTO_CAD) refuses a busy
@@ -479,6 +494,8 @@ class USBLoRaRadio(CadControlMixin, _RadioBase):
                     definitely_unsent = outcome == "refused"
                     if definitely_unsent:
                         logger.warning("[TX] Not sent - modem refused busy channel")
+                    elif tx_unsent:
+                        logger.warning("[TX] Not sent - radio link unavailable before submission")
                     else:
                         logger.error("[TX] Failed - no TX_DONE response")
                     # Try to restore RX anyway
@@ -498,6 +515,10 @@ class USBLoRaRadio(CadControlMixin, _RadioBase):
                             "lbt_backoff_delays_ms": lbt_backoff_delays,
                             "lbt_channel_busy": True,
                         }
+                    if tx_unsent:
+                        # Nothing reached the modem: reporting "uncertain" would
+                        # hold this packet's destination claim and block a retry.
+                        return self._unsent("not_submitted", lbt_backoff_delays)
                     return None
 
             except Exception as e:
@@ -1457,8 +1478,14 @@ class USBLoRaRadio(CadControlMixin, _RadioBase):
         payload: bytes,
         expect_cmd: int,
         timeout: float = 5.0,
+        invalidate_on_timeout: bool = True,
     ) -> Optional[bytes]:
-        """Bound admission, serial write and response separately, per radio."""
+        """Bound admission, serial write and response separately, per radio.
+
+        Sets ``_last_command_unsent`` when the frame was never handed to the
+        serial writer, so callers can tell "never sent" from "outcome unknown".
+        """
+        self._last_command_unsent = True
         if not self._connected_event.is_set() or self._stop_event.is_set():
             return None
         if self._pending_commands >= self._max_pending_commands:
@@ -1528,7 +1555,8 @@ class USBLoRaRadio(CadControlMixin, _RadioBase):
                 await asyncio.wait_for(evt.wait(), timeout=timeout)
             except asyncio.TimeoutError:
                 self._io_stats["response_timeouts"] += 1
-                self._invalidate_connection(f"response_timeout:0x{cmd:02X}", generation)
+                if invalidate_on_timeout:
+                    self._invalidate_connection(f"response_timeout:0x{cmd:02X}", generation)
                 return None
             if generation != self._generation:
                 return None
@@ -1543,6 +1571,7 @@ class USBLoRaRadio(CadControlMixin, _RadioBase):
             self._io_stats["queue_rejections"] += 1
             return None
         finally:
+            self._last_command_unsent = not submitted
             if acquired:
                 with self._response_lock:
                     if evt is not None and self._response_events.get(expect_cmd) is evt:
@@ -1551,15 +1580,27 @@ class USBLoRaRadio(CadControlMixin, _RadioBase):
                 self._command_lock.release()
             self._pending_commands -= 1
 
+    # A single late CAD reply is not a dead modem; reopen the port only after
+    # this many consecutive CAD response timeouts.
+    CAD_TIMEOUTS_BEFORE_RECONNECT = 3
+
     async def _perform_cad(self, timeout: float = 1.0) -> bool:
         """Perform Channel Activity Detection. Returns True if busy."""
+        generation = self._generation
         resp = await self._send_command(
             CMD_CAD_REQUEST,
             b"",
             expect_cmd=CMD_CAD_RESP,
             timeout=timeout,
+            invalidate_on_timeout=False,
         )
+        if resp is None and not self._last_command_unsent:
+            self._cad_timeouts = getattr(self, "_cad_timeouts", 0) + 1
+            if self._cad_timeouts >= self.CAD_TIMEOUTS_BEFORE_RECONNECT:
+                self._cad_timeouts = 0
+                self._invalidate_connection("cad_response_timeouts", generation)
         if resp in (b"\x00", b"\x01"):
+            self._cad_timeouts = 0
             busy = resp[0] != 0
             logger.debug(
                 "[CAD] BUSY - channel activity detected"
