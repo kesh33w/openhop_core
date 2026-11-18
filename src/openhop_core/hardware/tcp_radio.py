@@ -152,6 +152,7 @@ class TCPLoRaRadio(CadControlMixin, _RadioBase):
         # Last CMD_ERROR code seen, so send() can tell a firmware-side
         # auto-CAD refusal (ERR_CHANNEL_BUSY) from a real TX failure.
         self._last_modem_error = None  # int error code, or None
+        self._last_command_unsent = False  # True only when a command was never submitted
 
         # State
         self._sock: Optional[socket.socket] = None
@@ -276,11 +277,29 @@ class TCPLoRaRadio(CadControlMixin, _RadioBase):
             )
         return True
 
+    @staticmethod
+    def _unsent(reason, lbt_backoff_delays):
+        """A send that definitely put nothing on air: safe to retry."""
+        return {
+            "ok": False,
+            "tx_outcome_uncertain": False,
+            "reason": reason,
+            "airtime_ms": 0.0,
+            "lbt_attempts": len(lbt_backoff_delays),
+            "lbt_backoff_delays_ms": lbt_backoff_delays,
+            "lbt_channel_busy": bool(lbt_backoff_delays),
+        }
+
+    @property
+    def is_connected(self) -> bool:
+        """True while the modem socket is open; the fabric skips TX otherwise."""
+        return self._sock is not None
+
     async def send(self, data: bytes) -> Optional[dict]:
         """Send a LoRa packet asynchronously with LBT (CAD)."""
         if not self._initialized:
             logger.error("Radio not initialized")
-            return None
+            return self._unsent("not_initialized", [])
 
         async with self._tx_lock:
             # Log taxonomy, shared with the SPI radio: [LBT] is the
@@ -320,18 +339,11 @@ class TCPLoRaRadio(CadControlMixin, _RadioBase):
                         cad_checks += 1
                         channel_busy = await self._perform_cad(timeout=cad_timeout)
                     except Exception as e:
-                        logger.warning(f"[LBT] Channel check unavailable: {e}; not transmitting")
-                        # No TX request has been submitted. Unknown CAD is not
-                        # a clear channel, and must not authorize transmission.
-                        return {
-                            "ok": False,
-                            "tx_outcome_uncertain": False,
-                            "reason": "cad_unavailable",
-                            "airtime_ms": 0.0,
-                            "lbt_attempts": len(lbt_backoff_delays),
-                            "lbt_backoff_delays_ms": lbt_backoff_delays,
-                            "lbt_channel_busy": bool(lbt_backoff_delays),
-                        }
+                        # A missed channel check behaves like CAD off for this
+                        # packet (upstream behaviour) rather than dropping it.
+                        outcome = "cad_unavailable"
+                        logger.warning(f"[LBT] Channel check unavailable: {e}; transmitting anyway")
+                        break
                     if not channel_busy:
                         break
                     if time.monotonic() >= lbt_deadline:
@@ -355,6 +367,8 @@ class TCPLoRaRadio(CadControlMixin, _RadioBase):
                         expect_cmd=CMD_TX_DONE,
                         timeout=10.0,
                     )
+                    # Read before any await: was the TX frame never handed to the link?
+                    tx_unsent = self._last_command_unsent
                     if resp is not None:
                         break
                     # Firmware-side auto-CAD (CMD_SET_AUTO_CAD) refuses a busy
@@ -421,6 +435,8 @@ class TCPLoRaRadio(CadControlMixin, _RadioBase):
                     definitely_unsent = outcome == "refused"
                     if definitely_unsent:
                         logger.warning("[TX] Not sent - modem refused busy channel")
+                    elif tx_unsent:
+                        logger.warning("[TX] Not sent - radio link unavailable before submission")
                     else:
                         logger.error("[TX] Failed - no TX_DONE response")
                     # Try to restore RX anyway
@@ -440,6 +456,10 @@ class TCPLoRaRadio(CadControlMixin, _RadioBase):
                             "lbt_backoff_delays_ms": lbt_backoff_delays,
                             "lbt_channel_busy": True,
                         }
+                    if tx_unsent:
+                        # Nothing reached the modem: reporting "uncertain" would
+                        # hold this packet's destination claim and block a retry.
+                        return self._unsent("not_submitted", lbt_backoff_delays)
                     return None
 
             except Exception as e:
@@ -1084,7 +1104,10 @@ class TCPLoRaRadio(CadControlMixin, _RadioBase):
         expect_cmd: int,
         timeout: float = 5.0,
     ) -> Optional[bytes]:
+        # Whether the frame never reached the socket: "never sent" vs "unknown".
+        self._last_command_unsent = True
         async with self._command_lock:
+            self._last_command_unsent = True
             if self._sock is None:
                 return None
 
@@ -1101,6 +1124,7 @@ class TCPLoRaRadio(CadControlMixin, _RadioBase):
 
             try:
                 frame = build_frame(cmd, payload)
+                self._last_command_unsent = False  # A failed write may be partial.
                 try:
                     self._sock_write(frame)
                 except (OSError, ConnectionError) as e:
