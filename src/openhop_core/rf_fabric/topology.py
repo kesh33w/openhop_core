@@ -209,7 +209,10 @@ class ReceptionComparison:
             if failed:
                 self.tx.pop(key, None)
             elif key in self.tx:
+                # Refreshed entries move to the back: _expire stops at the first
+                # unexpired entry, so a stale head would block all later expiry.
                 self.tx[key] = (self.clock(), None)
+                self.tx.move_to_end(key)
 
     def snapshot(self):
         with self.lock:

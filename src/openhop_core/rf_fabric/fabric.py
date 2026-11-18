@@ -190,6 +190,11 @@ class RFFabric:
         if self.logical_receiver is not None:
             self.logical_receiver.close(require_unsubscribed=True)
         self.topology = topology
+        previous = getattr(self, "comparison", None)
+        if previous is not None and previous.capture is not None:
+            # Each comparison owns a capture writer thread and file handle;
+            # stop the old one before a new one opens the same file.
+            previous.capture.close()
         self.comparison = ReceptionComparison(topology)
         self.logical_receiver = logical_receiver
 

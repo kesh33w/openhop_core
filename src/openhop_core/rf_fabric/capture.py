@@ -61,6 +61,7 @@ class ReceptionCapture:
     def close(self):
         self.stop.set()
         self.thread.join(timeout=2)
+        atexit.unregister(self.close)  # Do not keep closed captures alive until exit.
 
     def _run(self):
         in_hand = False
