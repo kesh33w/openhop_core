@@ -1392,6 +1392,25 @@ class Dispatcher:
                 wire_key = topology.network(target) + ":wire:" + hashlib.sha256(packet.write_to()).hexdigest()
                 self.packet_filter.track_packet(wire_key)
 
+                # A copy we carry INTO a network (crossed from another network,
+                # or originated here) has no original reception there to
+                # protect: every later copy heard on that network descends from
+                # our TX. Claim its forwarding keys, or a neighbour's re-flood
+                # with a changed path would be forwarded straight back to the
+                # network it came from.
+                target_network = topology.network(target)
+                rx_rid = getattr(packet, "_rx_radio_id", None)
+                if self.destination_forwarding and (
+                    rx_rid is None or topology.network(rx_rid) != target_network
+                ):
+                    identity = packet_hash.rsplit(":", 1)[-1]
+                    for member in topology.members:
+                        if topology.network(member) == target_network:
+                            self.packet_filter.track_packet(
+                                f"{target_network}:{identity}:forward:"
+                                f"{topology.forwarding_class(member)}"
+                            )
+
         # ------------------------------------------------------------------ #
         #  Send the packet (lock ensures only one transmission at a time)
         # ------------------------------------------------------------------ #
