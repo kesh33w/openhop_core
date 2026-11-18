@@ -1507,10 +1507,8 @@ class USBLoRaRadio(CadControlMixin, _RadioBase):
         evt = None
         started = time.monotonic()
         try:
-            try:
-                await asyncio.wait_for(self._command_lock.acquire(), self._queue_timeout)
-                acquired = True
-            except asyncio.TimeoutError:
+            acquired = await self._acquire_command_lock()
+            if not acquired:
                 self._io_stats["queue_rejections"] += 1
                 logger.warning("Serial command queue timeout: port=%s cmd=0x%02X", self.port, cmd)
                 return None
@@ -1591,6 +1589,38 @@ class USBLoRaRadio(CadControlMixin, _RadioBase):
     # A single late CAD reply is not a dead modem; reopen the port only after
     # this many consecutive CAD response timeouts.
     CAD_TIMEOUTS_BEFORE_RECONNECT = 3
+
+    async def _acquire_command_lock(self) -> bool:
+        """Acquire the command lock within the queue timeout, never leaking it.
+
+        On Python 3.10/3.11 ``wait_for(lock.acquire())`` can be cancelled after
+        the inner acquire already succeeded, leaving the lock held forever and
+        every later command timing out. Acquire through a shielded task and give
+        the lock back if that task wins after we stopped waiting.
+        """
+        lock = self._command_lock
+        acquire = asyncio.ensure_future(lock.acquire())
+
+        def release_if_won(task):
+            if not task.cancelled() and task.exception() is None:
+                lock.release()
+
+        def abandon():
+            if acquire.done():
+                release_if_won(acquire)
+            else:
+                acquire.cancel()
+                acquire.add_done_callback(release_if_won)
+
+        try:
+            await asyncio.wait_for(asyncio.shield(acquire), self._queue_timeout)
+            return True
+        except asyncio.TimeoutError:
+            abandon()
+            return False
+        except BaseException:
+            abandon()
+            raise
 
     async def _perform_cad(self, timeout: float = 1.0) -> bool:
         """Perform Channel Activity Detection. Returns True if busy."""

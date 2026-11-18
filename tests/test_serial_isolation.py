@@ -499,3 +499,23 @@ def test_begin_waits_briefly_for_exiting_io_threads():
     r._open_serial_sync = open_serial
     r.begin()
     assert opened  # Got past the thread gate instead of failing at once.
+
+
+@pytest.mark.asyncio
+async def test_command_lock_is_never_leaked_by_timeout_or_cancellation():
+    from openhop_core.hardware.usb_radio import USBLoRaRadio
+
+    r = USBLoRaRadio(port="/dev/null")
+    r._queue_timeout = 0.05
+    await r._command_lock.acquire()  # Someone else holds it.
+    assert await r._acquire_command_lock() is False
+    waiter = asyncio.create_task(r._acquire_command_lock())
+    await asyncio.sleep(0)
+    r._command_lock.release()  # Hand-off races with the caller being cancelled.
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    await asyncio.sleep(0.01)
+    assert not r._command_lock.locked()
+    assert await r._acquire_command_lock() is True
+    r._command_lock.release()
