@@ -4,6 +4,10 @@ Fork-specific changes to OpenHop Core. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Fixed
+
+- **PyPI publish workflow:** upstream's workflow no longer runs in this fork. Publishing the `kesh-2026.11.18` GitHub Release triggered it; it ran tests and a build, then PyPI rejected the upload. Nothing was published.
+
 ## [kesh-2026.11.18] - 2026-11-18
 
 This is the first tagged fork release. It covers everything since the fork's upstream base, `openhop-dev/openhop_core` `dev` at `141d944` (2026-10-19).
