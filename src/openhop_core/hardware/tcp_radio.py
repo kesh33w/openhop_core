@@ -31,6 +31,7 @@ Usage:
 """
 
 import asyncio
+import inspect
 import logging
 import random
 import socket
@@ -1015,9 +1016,21 @@ class TCPLoRaRadio(CadControlMixin, _RadioBase):
 
         logger.debug("RX worker thread exiting")
 
-    def _deliver_rx_receipt(self, callback, data):
+    def _deliver_rx_receipt(self, callback, data, rssi=None, snr=None):
+        """Deliver this packet's own RSSI/SNR when the callback accepts them.
+
+        Metrics are captured per frame: ``last_rssi`` may already belong to a
+        later packet by the time a queued delivery runs. Binding is checked
+        before the call, so a TypeError raised inside the callback never causes
+        a second, data-only delivery.
+        """
         try:
-            callback(data)
+            try:
+                inspect.signature(callback).bind(data, rssi, snr)
+            except (TypeError, ValueError):
+                callback(data)
+            else:
+                callback(data, rssi, snr)
         except Exception:
             self._rx_receipts.invalidate()
             raise
@@ -1052,12 +1065,16 @@ class TCPLoRaRadio(CadControlMixin, _RadioBase):
 
                 if self._event_loop and self._event_loop.is_running():
                     self._event_loop.call_soon_threadsafe(
-                        self._deliver_rx_receipt, self.rx_callback, lora_data
+                        self._deliver_rx_receipt,
+                        self.rx_callback,
+                        lora_data,
+                        rssi,
+                        snr_x10 / 10.0,
                     )
                 else:
                     self._rx_receipts.invalidate()
                     try:
-                        self.rx_callback(lora_data)
+                        self._deliver_rx_receipt(self.rx_callback, lora_data, rssi, snr_x10 / 10.0)
                     except Exception as e:
                         self._rx_receipts.invalidate()
                         logger.error(f"RX callback error: {e}")
