@@ -4,6 +4,12 @@ Fork-specific changes to OpenHop Core. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-19
+
+### Changed
+
+- No changes. Tagged so all four repositories share the HydraHop version.
+
 ## [1.0.3] - 2026-11-19
 
 ### Fixed
