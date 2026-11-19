@@ -1,11 +1,15 @@
 # Changelog
 
-Fork-specific changes to OpenHop Core. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Releases are tagged `kesh-YYYY.MM.DD`, and the same tag is used across the repeater, core, web UI and hub repositories.
+Fork-specific changes to OpenHop Core. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Releases are HydraHop versions (`MAJOR.MINOR.PATCH`), tagged `hydrahop-vX.Y.Z` across the core, repeater, web UI and hub repositories. Releases up to 19 Nov 2026 used date tags (`kesh-YYYY.MM.DD`).
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-19
+
 ### Changed
 
+- **Versioning**: releases are now HydraHop semantic versions tagged `hydrahop-vX.Y.Z`; this is HydraHop 1.0.0. Date tags (`kesh-YYYY.MM.DD`) stay as history.
+- **README** links to the hub for the current version instead of naming a release that went stale. The library's own version (`1.1.4.dev6`, upstream's) is unchanged.
 - **README** title names the fork HydraHop.
 
 ## [kesh-2026.11.19] - 2026-11-19

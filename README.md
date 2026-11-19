@@ -5,7 +5,7 @@ This is Kesh's fork of [OpenHop Core](https://github.com/openhop-dev/openhop_cor
 | | |
 |---|---|
 | **Main line** | [`kesh/bridge`](https://github.com/kesh33w/openhop_core/tree/kesh/bridge): what production runs |
-| **Current release** | `kesh-2026.11.18`: see [CHANGELOG.md](CHANGELOG.md) |
+| **Releases** | Released together as **HydraHop** (`hydrahop-vX.Y.Z` tags). Current version and pins: [hydrahop](https://github.com/kesh33w/hydrahop#readme). Changes: [CHANGELOG.md](CHANGELOG.md) |
 | **Upstream base** | `openhop-dev/openhop_core` `dev` at `141d944` (19 Oct 2026) |
 | **Used by** | [openhop_repeater `kesh/bridge`](https://github.com/kesh33w/openhop_repeater), which depends on this branch by git URL |
 
@@ -42,7 +42,7 @@ python3 -m venv .venv
 
 Python 3.10 or later is required; CI tests 3.10 and newer. The `radio` extra adds serial support, and the `hardware` extra adds SPI, GPIO and USB. Unit tests need no radio attached.
 
-To deploy the whole system, follow the hub's [upgrade guide](https://github.com/kesh33w/kesh-openhop-bridge/blob/kesh/openhop-bridge/docs/upgrade.md). Development workflow, branching and releases are described in the repeater's [CONTRIBUTING.md](https://github.com/kesh33w/openhop_repeater/blob/kesh/bridge/CONTRIBUTING.md), which covers all four repositories. This repo's [CONTRIBUTING.md](CONTRIBUTING.md) lists the core-specific points.
+To deploy the whole system, follow the hub's [upgrade guide](https://github.com/kesh33w/hydrahop/blob/kesh/openhop-bridge/docs/upgrade.md). Development workflow, branching and releases are described in the repeater's [CONTRIBUTING.md](https://github.com/kesh33w/openhop_repeater/blob/kesh/bridge/CONTRIBUTING.md), which covers all four repositories. This repo's [CONTRIBUTING.md](CONTRIBUTING.md) lists the core-specific points.
 
 ## Limits
 
@@ -54,4 +54,4 @@ To deploy the whole system, follow the hub's [upgrade guide](https://github.com/
 
 OpenHop Core supplies the underlying Python implementation, and [MeshCore](https://github.com/meshcore-dev/MeshCore) the original C++ protocol. The [upstream documentation](https://docs.openhop.dev/projects/openhop-core/) covers general library use. The original copyright notices and [MIT License](LICENSE) are unchanged.
 
-Report fork-specific problems in the [hub's issues](https://github.com/kesh33w/kesh-openhop-bridge/issues), which cover all four repositories of this fork. Include the commit, the radio backend and steps to reproduce, and leave out channel keys and device credentials. For security problems see [SECURITY.md](SECURITY.md).
+Report fork-specific problems in the [hub's issues](https://github.com/kesh33w/hydrahop/issues), which cover all four repositories of this fork. Include the commit, the radio backend and steps to reproduce, and leave out channel keys and device credentials. For security problems see [SECURITY.md](SECURITY.md).
