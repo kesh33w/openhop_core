@@ -1,4 +1,4 @@
-# OpenHop Core: Kesh bridge fork
+# OpenHop Core: HydraHop fork
 
 This is Kesh's fork of [OpenHop Core](https://github.com/openhop-dev/openhop_core), the Python MeshCore protocol and radio library. It supplies the multi-radio layer for [Kesh's OpenHop Repeater fork](https://github.com/kesh33w/openhop_repeater), which bridges two MeshCore networks on different frequencies from one Raspberry Pi.
 
