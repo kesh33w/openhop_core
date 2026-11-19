@@ -20,6 +20,10 @@ permissions:
 
 jobs:
   test:
+    # Only upstream can publish openhop-core; in this fork a published GitHub
+    # Release would otherwise run the whole job and fail at the PyPI upload.
+    # build and publish-pypi depend on this job, so they are skipped too.
+    if: github.repository == 'openhop-dev/openhop_core'
     runs-on: ubuntu-latest
     strategy:
       matrix:
