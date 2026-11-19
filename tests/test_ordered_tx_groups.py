@@ -7,9 +7,11 @@ from openhop_core.protocol.constants import PAYLOAD_TYPE_ADVERT
 
 
 def topology(order=None, extra_role="transceiver"):
-    entries = [dict(id="smf", network="SMF", role="transceiver"),
-               dict(id="bay", network="SFO", role="transceiver"),
-               dict(id="rak", network="SFO", role=extra_role)]
+    entries = [
+        dict(id="smf", network="SMF", role="transceiver"),
+        dict(id="bay", network="SFO", role="transceiver"),
+        dict(id="rak", network="SFO", role=extra_role),
+    ]
     settings = dict(networks={"SMF": "smf", "SFO": "bay"})
     if order is not None:
         settings["tx_groups"] = {"bay": order}
@@ -19,10 +21,13 @@ def topology(order=None, extra_role="transceiver"):
 class Radio:
     _cad_mode_explicit = False
     lbt_enabled = False
+
     def __init__(self, result=True):
         self.result, self.sent = result, []
+
     def set_rx_callback(self, cb):
         pass
+
     async def send(self, data):
         self.sent.append(data)
         if isinstance(self.result, BaseException):
@@ -62,7 +67,9 @@ def test_ordered_groups_keep_logical_primary_and_policy():
         t.check_tx("rak", reply_to_radio_id="smf", group_primary="bay")
 
 
-@pytest.mark.parametrize("order", [["rak", "rak", "bay"], ["smf", "bay"], ["rak"], [], ["missing", "bay"]])
+@pytest.mark.parametrize(
+    "order", [["rak", "rak", "bay"], ["smf", "bay"], ["rak"], [], ["missing", "bay"]]
+)
 def test_invalid_groups(order):
     with pytest.raises(ValueError):
         topology(order)
@@ -75,9 +82,11 @@ def test_extra_transceiver_requires_opt_in():
 
 @pytest.mark.parametrize("role", ["shadow", "receiver"])
 def test_group_secondary_keeps_receive_role_and_routing(role):
-    entries = [dict(id="smf", network="SMF", role="transceiver"),
-               dict(id="bay", network="SFO", role="transceiver"),
-               dict(id="rak", network="SFO", role=role)]
+    entries = [
+        dict(id="smf", network="SMF", role="transceiver"),
+        dict(id="bay", network="SFO", role="transceiver"),
+        dict(id="rak", network="SFO", role=role),
+    ]
     base = {"networks": {"SMF": "smf", "SFO": "bay"}, "enable_receiver_forwarding": True}
     before = NetworkTopology(entries, base, "smf")
     after = NetworkTopology(entries, {**base, "tx_groups": {"bay": ["rak", "bay"]}}, "smf")
@@ -119,7 +128,9 @@ async def test_cad_setting_does_not_gate_or_change_ordered_group():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("result", [None, {"ok": False, "tx_outcome_uncertain": True}, RuntimeError("lost response")])
+@pytest.mark.parametrize(
+    "result", [None, {"ok": False, "tx_outcome_uncertain": True}, RuntimeError("lost response")]
+)
 async def test_uncertainty_blocks_next_leg_and_preserves_claim(result):
     f, radios, data = setup()
     radios["rak"].result = result
@@ -150,10 +161,12 @@ async def test_definite_failure_allows_second_and_all_failure_releases_claim():
 async def test_changed_bytes_and_scope_escape_rejected():
     f, radios, data = setup()
     release = asyncio.Event()
+
     async def late_send():
         await release.wait()
         with pytest.raises(ValueError, match="closed"):
             await f.send(data, radio_id="bay")
+
     with f.ordered_tx_group("bay"):
         await f.send(data, radio_id="rak")
         with pytest.raises(ValueError, match="identical"):
@@ -183,10 +196,12 @@ async def test_definitely_unsent_leg_retry_preserves_cad():
 async def test_scope_blocks_overlap_and_expiry():
     f, radios, data = setup()
     started, release = asyncio.Event(), asyncio.Event()
+
     async def wait_send(data):
         started.set()
         await release.wait()
         return True
+
     radios["rak"].send = wait_send
     with f.ordered_tx_group("bay") as group:
         task = asyncio.create_task(f.send(data, radio_id="rak"))

@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-from contextvars import ContextVar
 import enum
-import inspect
 import hashlib
+import inspect
 import logging
 import random
 import time
+from contextvars import ContextVar
 from typing import Any, Awaitable, Callable, List, Optional
 
 from ..protocol import Packet, PacketBuilder
@@ -531,7 +531,8 @@ class Dispatcher:
         data: bytes,
         rssi: Optional[int] = None,
         snr: Optional[float] = None,
-        *, rx_radio_id: Any = _RX_RADIO_ID_UNSET,
+        *,
+        rx_radio_id: Any = _RX_RADIO_ID_UNSET,
     ) -> None:
         """Called by the radio when a packet comes in. rssi/snr are per-packet when provided."""
         if not self._rx_enabled:
@@ -557,6 +558,7 @@ class Dispatcher:
 
     def _network_topology(self):
         from ..rf_fabric.topology import NetworkTopology
+
         topology = getattr(getattr(self.radio, "fabric", None), "topology", None)
         return topology if isinstance(topology, NetworkTopology) else None
 
@@ -718,7 +720,9 @@ class Dispatcher:
         if not self._is_transit_direct_not_next_hop(pkt):
             forwarding_key = packet_hash
             if topology and topology.has_receivers and self.destination_forwarding:
-                wire_key = topology.network(rx_radio_id) + ":wire:" + hashlib.sha256(data).hexdigest()
+                wire_key = (
+                    topology.network(rx_radio_id) + ":wire:" + hashlib.sha256(data).hexdigest()
+                )
                 if self.packet_filter.is_duplicate(wire_key):
                     return
                 forwarding_key = packet_hash + ":forward:" + topology.forwarding_class(rx_radio_id)
@@ -1224,9 +1228,12 @@ class Dispatcher:
         """
         topology = self._network_topology()
         reply_to = self._reply_ingress.get()
-        if (topology is not None and reply_to is not None
-                and getattr(packet, "_rx_radio_id", None) is None
-                and getattr(packet, "_reply_to_radio_id", None) is None):
+        if (
+            topology is not None
+            and reply_to is not None
+            and getattr(packet, "_rx_radio_id", None) is None
+            and getattr(packet, "_reply_to_radio_id", None) is None
+        ):
             packet._reply_to_radio_id = reply_to
         # TRACE is only sent via sendDirect() in firmware; flood TRACE is unsupported.
         route_type = packet.get_route_type()
@@ -1380,8 +1387,11 @@ class Dispatcher:
             topology = self._network_topology()
             if topology is not None:
                 target = self.radio.resolve_tx_radio_id(
-                    packet.write_to(), radio_id, rx_radio_id=getattr(packet, "_rx_radio_id", None),
-                    reply_to_radio_id=getattr(packet, "_reply_to_radio_id", None))
+                    packet.write_to(),
+                    radio_id,
+                    rx_radio_id=getattr(packet, "_rx_radio_id", None),
+                    reply_to_radio_id=getattr(packet, "_reply_to_radio_id", None),
+                )
                 packet_hash = topology.network(target) + ":" + packet_hash.rsplit(":", 1)[-1]
             self.packet_filter.track_packet(packet_hash)
 
@@ -1389,7 +1399,11 @@ class Dispatcher:
                 # Do not let a native TX claim another ear's original reception:
                 # it has the same payload but a different path. Exact wire echoes
                 # are blocked here; destination admission suppresses other repeats.
-                wire_key = topology.network(target) + ":wire:" + hashlib.sha256(packet.write_to()).hexdigest()
+                wire_key = (
+                    topology.network(target)
+                    + ":wire:"
+                    + hashlib.sha256(packet.write_to()).hexdigest()
+                )
                 self.packet_filter.track_packet(wire_key)
 
                 # A copy we carry INTO a network (crossed from another network,
@@ -1425,7 +1439,8 @@ class Dispatcher:
         reply_to = getattr(packet, "_reply_to_radio_id", None)
         if topology is not None and reply_to is not None:
             tx_radio_id = self.radio.resolve_tx_radio_id(
-                raw, radio_id, rx_radio_id=rx_radio_id, reply_to_radio_id=reply_to)
+                raw, radio_id, rx_radio_id=rx_radio_id, reply_to_radio_id=reply_to
+            )
         else:
             tx_radio_id = self._resolve_tx_radio_id_for_log(raw, radio_id, rx_radio_id)
         try:
@@ -1435,8 +1450,9 @@ class Dispatcher:
             pass_rx = rx_radio_id is not None and _names_keyword(send_fn, "rx_radio_id")
             reply_to = getattr(packet, "_reply_to_radio_id", None)
             if topology is not None and reply_to is not None:
-                tx_metadata = await send_fn(raw, radio_id=radio_id, rx_radio_id=rx_radio_id,
-                                           reply_to_radio_id=reply_to)
+                tx_metadata = await send_fn(
+                    raw, radio_id=radio_id, rx_radio_id=rx_radio_id, reply_to_radio_id=reply_to
+                )
             elif radio_id is not None and _names_keyword(send_fn, "radio_id"):
                 if pass_rx:
                     tx_metadata = await send_fn(raw, radio_id=radio_id, rx_radio_id=rx_radio_id)
@@ -1457,10 +1473,17 @@ class Dispatcher:
             and tx_metadata is not False
             and not isinstance(tx_metadata, dict)
         )
-        if unsupported_outcome or tx_metadata is False or (
-            isinstance(tx_metadata, dict)
-            and (tx_metadata.get("ok") is False or tx_metadata.get("tx_outcome_uncertain")
-                 or tx_metadata.get("suppressed"))
+        if (
+            unsupported_outcome
+            or tx_metadata is False
+            or (
+                isinstance(tx_metadata, dict)
+                and (
+                    tx_metadata.get("ok") is False
+                    or tx_metadata.get("tx_outcome_uncertain")
+                    or tx_metadata.get("suppressed")
+                )
+            )
         ):
             packet._tx_metadata = {
                 "radio_id": tx_radio_id,

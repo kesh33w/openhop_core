@@ -4,8 +4,9 @@ Never disables global packet deduplication. The context has a finite lifetime,
 accepts one byte string or explicitly declared final-hop flood variants, and
 cannot be reused by a detached child task.
 """
-from dataclasses import dataclass, field
+
 import time
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -26,19 +27,31 @@ class OrderedTxContext:
     def __post_init__(self):
         if self.expected_frames is None:
             return
-        from ..protocol.packet import Packet
         from ..protocol.constants import PAYLOAD_TYPE_TRACE
+        from ..protocol.packet import Packet
+
         if set(self.expected_frames) != set(self.targets):
             raise ValueError("Expected frames must cover ordered targets exactly")
         signatures = []
         for raw in self.expected_frames.values():
-            packet = Packet(); packet.read_from(raw)
+            packet = Packet()
+            packet.read_from(raw)
             width = packet.get_path_hash_size()
-            if (not packet.is_route_flood() or packet.get_payload_type() == PAYLOAD_TYPE_TRACE
-                    or len(packet.path) < width):
+            if (
+                not packet.is_route_flood()
+                or packet.get_payload_type() == PAYLOAD_TYPE_TRACE
+                or len(packet.path) < width
+            ):
                 raise ValueError("Only flood final-hop variants are permitted")
-            signatures.append((packet.header, packet.path_len, bytes(packet.path[:-width]),
-                               bytes(packet.payload), tuple(packet.transport_codes)))
+            signatures.append(
+                (
+                    packet.header,
+                    packet.path_len,
+                    bytes(packet.path[:-width]),
+                    bytes(packet.payload),
+                    tuple(packet.transport_codes),
+                )
+            )
         if any(sig != signatures[0] for sig in signatures[1:]):
             raise ValueError("Ordered variants may differ only in final path hash")
         self.expected_frames = {k: bytes(v) for k, v in self.expected_frames.items()}
@@ -66,9 +79,13 @@ class OrderedTxContext:
     def finish(self, target, result, exception=False):
         self.inflight = False
         confirmed = result is True or (isinstance(result, dict) and result.get("ok") is True)
-        uncertain = exception or (isinstance(result, dict) and bool(result.get("tx_outcome_uncertain")))
+        uncertain = exception or (
+            isinstance(result, dict) and bool(result.get("tx_outcome_uncertain"))
+        )
         # Unknown vendor return values are not evidence that the transmitter stopped.
-        definite_failure = result is False or (isinstance(result, dict) and result.get("ok") is False and not uncertain)
+        definite_failure = result is False or (
+            isinstance(result, dict) and result.get("ok") is False and not uncertain
+        )
         if confirmed or uncertain or not definite_failure:
             self.completed.add(target)
             self.preserve_claim = True
