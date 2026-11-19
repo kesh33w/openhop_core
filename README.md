@@ -1,53 +1,57 @@
-# Kesh's OpenHop Core bridge fork
+# OpenHop Core: Kesh bridge fork
 
-This is Kesh's fork of [OpenHop Core](https://github.com/openhop-dev/openhop_core), the Python MeshCore protocol and radio library. The `kesh/bridge` branch supplies radio handling for [Kesh's OpenHop bridge](https://github.com/kesh33w/kesh-openhop-bridge), a Raspberry Pi repeater with two radios on different frequencies.
+This is Kesh's fork of [OpenHop Core](https://github.com/openhop-dev/openhop_core), the Python MeshCore protocol and radio library. It supplies the multi-radio layer for [Kesh's OpenHop Repeater fork](https://github.com/kesh33w/openhop_repeater), which bridges two MeshCore networks on different frequencies from one Raspberry Pi.
 
-Core provides the radio and packet interfaces. The [Repeater fork](https://github.com/kesh33w/openhop_repeater/tree/kesh/bridge) implements channel translation, routing policy and queues. The hub contains the optional iLink sidecar and enrollment service.
+| | |
+|---|---|
+| **Main line** | [`kesh/bridge`](https://github.com/kesh33w/openhop_core/tree/kesh/bridge): what production runs |
+| **Current release** | `kesh-2026.11.18`: see [CHANGELOG.md](CHANGELOG.md) |
+| **Upstream base** | `openhop-dev/openhop_core` `dev` at `141d944` (19 Oct 2026) |
+| **Used by** | [openhop_repeater `kesh/bridge`](https://github.com/kesh33w/openhop_repeater), which depends on this branch by git URL |
 
-## Changes used by the bridge
+`pip install openhop-core` installs **upstream**, which lacks modules the repeater fork imports. Install from this repository instead (see below).
 
-- The [RF fabric](src/openhop_core/rf_fabric) records the receiving radio and supports sends through a named radio. The dispatcher still handles packet deduplication across radios.
-- The [dispatcher](src/openhop_core/node/dispatcher.py) passes receive-radio metadata to compatible raw-packet subscribers and packet handlers.
-- Send results distinguish a failed transmission from an uncertain outcome. An internal driver error does not trigger a second send through the default radio.
-- The [USB driver](src/openhop_core/hardware/usb_radio.py) captures each packet's RSSI and SNR before handing it to the event loop. A later packet cannot overwrite the earlier packet's signal readings. Status getters still report the most recent reception.
+## What this fork changes
 
-A successful modem transmission does not establish recipient delivery. The library also does not make cross-channel translation end-to-end encrypted. The Repeater must decrypt an eligible group message with its source key and encrypt a new copy with its destination key.
+![How a packet moves through the fork's multi-radio layer](docs/images/core-rf-path.svg)
 
-## Use matching source
+| Area | Change | Where |
+|---|---|---|
+| **Network topology** | Two named logical networks, each with one designated transmitter, plus `receiver` and `shadow` radios. Receptions keep their physical radio and network, and the TX policy (`sticky`, `bridge`, `default`) is checked per network. | `rf_fabric/topology.py` |
+| **Logical receivers** | Copies of a packet heard by several radios on one network become a single reception that remembers every radio that heard it. | `rf_fabric/logical_receiver.py` |
+| **Ordered TX groups** | One logical packet goes out through two radios on the same network in a fixed order, one after the other. A group can apply to every send or to bridged sends only (`tx_group_scopes`). | `rf_fabric/ordered_tx.py`, `topology.py`, `fabric.py` |
+| **Per-network duplicate suppression** | Separate per network and per receive role. A packet this node carried into a network is never forwarded back to the network it came from. | `node/dispatcher.py` |
+| **Transmit outcomes** | Every send ends as *confirmed*, *definitely not sent* (safe to retry) or *uncertain* (never retried). Suppressed duplicates are reported as suppressed, not failed. | `hardware/usb_radio.py`, `tcp_radio.py`, `dispatcher.py` |
+| **USB modem robustness** | Serial I/O runs on its own threads, and stale sessions are fenced off. Each packet keeps its own RSSI and SNR. The command lock can't leak. Reconnects happen only after repeated CAD timeouts. | `hardware/usb_radio.py` |
+| **CAD control** | Per-radio CAD on/off, applied only after the modem acknowledges. When a channel check fails, the packet is sent anyway, as upstream does. | `hardware/cad_control.py`, [docs/cad-control.md](docs/cad-control.md) |
+| **Raw receive receipts** | Ordered, fenced receipts for a local bot's raw RF fallback. | `hardware/rx_receipts.py` |
+| **Reception capture** | Opt-in JSONL capture of RX and TX events for comparing antennas (`OPENHOP_RX_CAPTURE_PATH`). | `rf_fabric/capture.py` |
+| **Private-peer provenance** | Internet Link packets carry their origin and expiry without any change to the wire packet. | `protocol/packet.py`, `dispatcher.py` |
 
-For the full bridge, follow the hub's [reconstruction workflow](https://github.com/kesh33w/kesh-openhop-bridge#reconstruct-and-test). Select `components.current.json` explicitly. That manifest records a dated source snapshot, not necessarily the latest branch tips or the software installed on a Pi.
+All of this is inactive unless the repeater configures a topology. A single-radio node behaves like upstream.
 
-To work on this Core branch alone:
+## Install and test
 
 ```sh
-git clone --branch kesh/bridge --single-branch https://github.com/kesh33w/openhop_core.git
+git clone --branch kesh/bridge https://github.com/kesh33w/openhop_core.git
 cd openhop_core
 python3 -m venv .venv
-.venv/bin/python -m pip install -e '.[test]'
-.venv/bin/python -m pytest --tb=short
+.venv/bin/pip install -e '.[dev,hardware]'
+.venv/bin/pre-commit run --all-files     # black, isort, flake8, full test suite
 ```
 
-The package requires Python 3.10 or later. The hub's recorded integration environment uses Python 3.14. These commands install this checkout in a virtual environment; `pip install openhop-core` installs the upstream package instead.
+Python 3.10 or later is required; CI tests 3.10 and newer. The `radio` extra adds serial support, and the `hardware` extra adds SPI, GPIO and USB. Unit tests need no radio attached.
 
-The `radio` extra adds serial support. The `hardware` extra adds SPI, GPIO and USB dependencies, some of which are platform-specific. Install only the extras required by your hardware. Running unit tests does not require a connected radio.
+To deploy the whole system, follow the hub's [upgrade guide](https://github.com/kesh33w/kesh-openhop-bridge/blob/kesh/openhop-bridge/docs/upgrade.md). Development workflow, branching and releases are described in the repeater's [CONTRIBUTING.md](https://github.com/kesh33w/openhop_repeater/blob/kesh/bridge/CONTRIBUTING.md), which covers all four repositories. This repo's [CONTRIBUTING.md](CONTRIBUTING.md) lists the core-specific points.
 
-## Source and tests
+## Limits
 
-| Path | Purpose |
-| --- | --- |
-| [src/openhop_core/rf_fabric](src/openhop_core/rf_fabric) | Multi-radio receive observations and transmit selection |
-| [src/openhop_core/hardware](src/openhop_core/hardware) | SPI, USB and network radio drivers |
-| [src/openhop_core/node](src/openhop_core/node) | Mesh node, dispatcher and handlers |
-| [src/openhop_core/protocol](src/openhop_core/protocol) | Packet encoding and protocol definitions |
-| [tests/test_usb_rx_metrics.py](tests/test_usb_rx_metrics.py) | Per-packet USB signal readings and callback compatibility |
-| [tests/test_dispatcher_tx_outcome.py](tests/test_dispatcher_tx_outcome.py) | Failed and uncertain sends |
-| [tests/test_dispatcher_raw_rx_radio.py](tests/test_dispatcher_raw_rx_radio.py) | Receive-radio metadata for raw subscribers |
-| [docs/openhop-frame-extensions.md](docs/openhop-frame-extensions.md) | OpenHop-specific companion frames |
-
-The [examples](examples) exercise the library directly. Review their radio settings and host requirements before running them on hardware. Unit-test results do not establish RF range, regulatory compliance or field reliability.
+- A modem's confirmation that it transmitted is not proof that anyone received the packet.
+- This library does not make cross-channel translation end-to-end encrypted. The repeater decrypts and re-encrypts.
+- Unit tests do not establish RF range, regulatory compliance or field reliability.
 
 ## Upstream and license
 
-OpenHop Core supplies the underlying Python implementation. [MeshCore](https://github.com/meshcore-dev/MeshCore) supplies the original C++ protocol implementation. The [upstream documentation](https://docs.openhop.dev/projects/openhop-core/) covers general library use, but does not describe all changes on this branch.
+OpenHop Core supplies the underlying Python implementation, and [MeshCore](https://github.com/meshcore-dev/MeshCore) the original C++ protocol. The [upstream documentation](https://docs.openhop.dev/projects/openhop-core/) covers general library use. The original copyright notices and [MIT License](LICENSE) are unchanged.
 
-The original copyright notices and [MIT License](LICENSE) remain unchanged. Report fork-specific problems in [this repository](https://github.com/kesh33w/openhop_core/issues), with the commit, radio backend and steps to reproduce. Keep channel keys and device credentials out of reports.
+Report fork-specific problems in [this repository's issues](https://github.com/kesh33w/openhop_core/issues). Include the commit, the radio backend and steps to reproduce, and leave out channel keys and device credentials. For security problems see [SECURITY.md](SECURITY.md).
