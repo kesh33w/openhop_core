@@ -4,6 +4,8 @@ Fork-specific changes to OpenHop Core. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-11-19
+
 ### Fixed
 
 - **TCP modem RSSI/SNR reach observers.** The TCP modem driver (network-attached modems such as the Station G3) read each packet's RSSI and SNR but called back with the packet bytes only. MQTT observers therefore published those receptions with no RSSI or SNR, and routing fell back to whichever value the modem had seen last. Each packet now carries its own metrics, as the USB driver already did. Data-only callbacks still work.
