@@ -4,6 +4,8 @@ Fork-specific changes to OpenHop Core. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+## [kesh-2026.11.18.1] - 2026-11-18
+
 ### Fixed
 
 - **PyPI publish workflow:** upstream's workflow no longer runs in this fork. Publishing the `kesh-2026.11.18` GitHub Release triggered it; it ran tests and a build, then PyPI rejected the upload. Nothing was published.
@@ -49,5 +51,6 @@ This is the first tagged fork release. It covers everything since the fork's ups
 - **USB command lock**: it could leak on Python 3.10/3.11 when a waiting command was cancelled.
 - **Reception capture**: reconfiguring the topology leaked the previous capture thread, and refreshed TX entries stalled expiry.
 
-[Unreleased]: https://github.com/kesh33w/openhop_core/compare/kesh-2026.11.18...kesh/bridge
+[Unreleased]: https://github.com/kesh33w/openhop_core/compare/kesh-2026.11.18.1...kesh/bridge
+[kesh-2026.11.18.1]: https://github.com/kesh33w/openhop_core/compare/kesh-2026.11.18...kesh-2026.11.18.1
 [kesh-2026.11.18]: https://github.com/kesh33w/openhop_core/compare/141d944...kesh-2026.11.18
