@@ -4,6 +4,8 @@ Fork-specific changes to OpenHop Core. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+## [kesh-2026.11.19] - 2026-11-19
+
 ### Changed
 
 - **README** points feedback and bug reports at the hub's issues, the single place for all four repositories.
