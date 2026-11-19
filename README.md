@@ -54,4 +54,4 @@ To deploy the whole system, follow the hub's [upgrade guide](https://github.com/
 
 OpenHop Core supplies the underlying Python implementation, and [MeshCore](https://github.com/meshcore-dev/MeshCore) the original C++ protocol. The [upstream documentation](https://docs.openhop.dev/projects/openhop-core/) covers general library use. The original copyright notices and [MIT License](LICENSE) are unchanged.
 
-Report fork-specific problems in [this repository's issues](https://github.com/kesh33w/openhop_core/issues). Include the commit, the radio backend and steps to reproduce, and leave out channel keys and device credentials. For security problems see [SECURITY.md](SECURITY.md).
+Report fork-specific problems in the [hub's issues](https://github.com/kesh33w/kesh-openhop-bridge/issues), which cover all four repositories of this fork. Include the commit, the radio backend and steps to reproduce, and leave out channel keys and device credentials. For security problems see [SECURITY.md](SECURITY.md).
