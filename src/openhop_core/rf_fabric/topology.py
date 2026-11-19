@@ -8,6 +8,9 @@ import time
 from collections import Counter, OrderedDict
 from threading import RLock
 
+# Which sends a TX group applies to.
+TX_GROUP_SCOPES = ("all", "crossings")
+
 
 class NetworkTopology:
     def __init__(self, entries, settings, default_radio):
@@ -16,6 +19,7 @@ class NetworkTopology:
             "enable_receiver_forwarding",
             "repeat_receiver_on_network",
             "tx_groups",
+            "tx_group_scopes",
         }:
             raise ValueError("Invalid fabric.topology fields")
         self.networks = settings.get("networks")
@@ -58,6 +62,16 @@ class NetworkTopology:
             if any(rid not in self.members or self.members[rid][0] != network for rid in targets):
                 raise ValueError("TX group members must belong to the same network")
             self.tx_groups[primary] = tuple(targets)
+        scopes = settings.get("tx_group_scopes", {})
+        if not isinstance(scopes, dict):
+            raise ValueError("tx_group_scopes must map TX group primaries to all or crossings")
+        self.tx_group_scopes = {}
+        for primary, scope in scopes.items():
+            if primary not in self.tx_groups:
+                raise ValueError("tx_group_scopes may only name a configured TX group")
+            if scope not in TX_GROUP_SCOPES:
+                raise ValueError("TX group scope must be 'all' or 'crossings'")
+            self.tx_group_scopes[primary] = scope
         permitted = set(self.networks.values())
         for targets in self.tx_groups.values():
             permitted.update(targets)
@@ -133,6 +147,21 @@ class NetworkTopology:
         if logical_primary not in self.networks.values():
             raise ValueError("TX expansion requires a logical network primary")
         return self.tx_groups.get(logical_primary, (logical_primary,))
+
+    def tx_group_scope(self, logical_primary):
+        """``all`` (every send uses the group) or ``crossings`` (bridged sends only)."""
+        return self.tx_group_scopes.get(logical_primary, "all")
+
+    def tx_targets_for(self, logical_primary, *, crossing=False):
+        """Physical egresses for one send.
+
+        A group scoped to ``crossings`` sends bridged packets through every
+        member, in order, and everything else through its primary alone.
+        """
+        targets = self.tx_targets(logical_primary)
+        if not crossing and self.tx_group_scope(logical_primary) == "crossings":
+            return (logical_primary,)
+        return targets
 
     def check_tx(self, target, ingress=None, *, reply_to_radio_id=None, group_primary=None):
         if group_primary is not None:
