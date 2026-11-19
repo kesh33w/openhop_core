@@ -4,6 +4,10 @@ Fork-specific changes to OpenHop Core. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Changed
+
+- **README** title names the fork HydraHop.
+
 ## [kesh-2026.11.19] - 2026-11-19
 
 ### Changed
