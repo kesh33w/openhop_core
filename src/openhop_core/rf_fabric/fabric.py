@@ -7,17 +7,17 @@ explicit radio for TX. Each physical callback yields one ``RFIngress`` with one
 
 from __future__ import annotations
 
-import inspect
 import hashlib
+import inspect
 import logging
 import time
+from collections import OrderedDict
 from contextlib import contextmanager
 from contextvars import ContextVar
-from .ordered_tx import OrderedTxContext
-from collections import OrderedDict
 from typing import Any, Awaitable, Callable, Optional, Union
 
 from .models import RadioReception, RFIngress
+from .ordered_tx import OrderedTxContext
 
 logger = logging.getLogger("RFFabric")
 
@@ -186,10 +186,14 @@ class RFFabric:
 
     def configure_topology(self, topology):
         from .topology import ReceptionComparison
+
         missing = set(topology.members) - set(self._radios)
-        if set(self._radios) - set(topology.members) or any(not topology.is_shadow(rid) for rid in missing):
+        if set(self._radios) - set(topology.members) or any(
+            not topology.is_shadow(rid) for rid in missing
+        ):
             raise ValueError("Topology must describe all radios and have both transmitters")
         from .logical_receiver import LogicalReceiver
+
         logical_receiver = LogicalReceiver(topology)
         if self.logical_receiver is not None:
             self.logical_receiver.close(require_unsubscribed=True)
@@ -273,8 +277,11 @@ class RFFabric:
     def has_rx_binding(self, radio_id: str) -> bool:
         """Whether the armed physical callback still belongs to this fabric."""
         callback = self._rx_bindings.get(radio_id)
-        return (self._armed and callback is not None
-                and getattr(self._radios.get(radio_id), "rx_callback", None) is callback)
+        return (
+            self._armed
+            and callback is not None
+            and getattr(self._radios.get(radio_id), "rx_callback", None) is callback
+        )
 
     def _unbind_one(self, radio_id: str, radio: Any = None) -> None:
         self._rx_bindings.pop(radio_id, None)
@@ -304,8 +311,9 @@ class RFFabric:
         # Synchronous observation edge never admits packets to routing.
         for callback in tuple(self._observation_callbacks):
             try:
-                callback(bytes(data), rssi, snr, rx_radio_id=radio_id,
-                         own_tx_match=bool(own_tx_match))
+                callback(
+                    bytes(data), rssi, snr, rx_radio_id=radio_id, own_tx_match=bool(own_tx_match)
+                )
             except Exception:
                 logger.exception("Physical RX observer failed")
 
@@ -320,18 +328,22 @@ class RFFabric:
         own_tx_match = False
         if self.topology:
             from ..protocol.packet import Packet
+
             try:
                 packet = Packet()
                 packet.read_from(data)
-                own_tx_match = self.comparison.receive(radio_id, packet.calculate_packet_hash().hex(), hashlib.sha256(data).digest())
+                own_tx_match = self.comparison.receive(
+                    radio_id, packet.calculate_packet_hash().hex(), hashlib.sha256(data).digest()
+                )
             except Exception:
                 # Observers count malformed drops, without admitting routing.
                 self._notify_observation(data, rssi, snr, radio_id, False)
                 return
         self._notify_observation(data, rssi, snr, radio_id, own_tx_match)
         if self.logical_receiver is not None:
-            self.logical_receiver.observe(data, rssi, snr, rx_radio_id=radio_id,
-                                          own_tx_match=own_tx_match)
+            self.logical_receiver.observe(
+                data, rssi, snr, rx_radio_id=radio_id, own_tx_match=own_tx_match
+            )
         if self.topology and self.topology.is_shadow(radio_id):
             return
         reception = RadioReception(
@@ -399,7 +411,9 @@ class RFFabric:
         targets = self.topology.tx_targets(logical_primary)
         if len(targets) < 2:
             raise ValueError("No ordered TX group configured")
-        group = OrderedTxContext(logical_primary, targets, time.monotonic() + 300, expected_frames=expected_frames)
+        group = OrderedTxContext(
+            logical_primary, targets, time.monotonic() + 300, expected_frames=expected_frames
+        )
         token = self._ordered_tx.set(group)
         try:
             yield group
@@ -439,8 +453,12 @@ class RFFabric:
             group = self._ordered_tx.get()
             if group is not None:
                 group.validate(radio_id)
-            self.topology.check_tx(radio_id, rx_radio_id, reply_to_radio_id=reply_to_radio_id,
-                                   group_primary=group.primary if group else None)
+            self.topology.check_tx(
+                radio_id,
+                rx_radio_id,
+                reply_to_radio_id=reply_to_radio_id,
+                group_primary=group.primary if group else None,
+            )
         if radio_id is not None:
             if radio_id not in self._radios:
                 raise KeyError(f"Unknown radio_id={radio_id!r}")
@@ -476,10 +494,12 @@ class RFFabric:
         ``radio_id`` so callers (Dispatcher TX logs) know which endpoint TX'd.
         Non-dict results are returned unchanged for legacy radios.
         """
-        rid = self.resolve_tx_radio_id(data, radio_id, rx_radio_id=rx_radio_id, reply_to_radio_id=reply_to_radio_id)
+        rid = self.resolve_tx_radio_id(
+            data, radio_id, rx_radio_id=rx_radio_id, reply_to_radio_id=reply_to_radio_id
+        )
         radio = self._radios[rid]
-        if self.topology and getattr(radio, 'is_connected', True) is False:
-            return {'ok': False, 'radio_id': rid, 'reason': 'designated transmitter disconnected'}
+        if self.topology and getattr(radio, "is_connected", True) is False:
+            return {"ok": False, "radio_id": rid, "reason": "designated transmitter disconnected"}
         if not hasattr(radio, "send"):
             raise RuntimeError(f"Radio {rid!r} ({type(radio).__name__}) does not support send()")
         network = None
@@ -488,34 +508,54 @@ class RFFabric:
         if group is not None:
             group.begin(rid, data)
         if self.topology:
-            from ..protocol.packet import Packet
             from ..protocol.constants import PAYLOAD_TYPE_ACK, PAYLOAD_TYPE_MULTIPART
+            from ..protocol.packet import Packet
+
             packet = Packet()
             packet.read_from(data)
             # ACK redundancy is protocol-defined and must retain its extra copies.
             is_ack = packet.get_payload_type() == PAYLOAD_TYPE_ACK or (
-                packet.get_payload_type() == PAYLOAD_TYPE_MULTIPART and packet.payload
-                and packet.payload[0] & 0x0f == PAYLOAD_TYPE_ACK)
+                packet.get_payload_type() == PAYLOAD_TYPE_MULTIPART
+                and packet.payload
+                and packet.payload[0] & 0x0F == PAYLOAD_TYPE_ACK
+            )
             if not is_ack:
                 now = time.monotonic()
-                while self._network_tx_seen and now - next(iter(self._network_tx_seen.values())) > 300:
+                while (
+                    self._network_tx_seen and now - next(iter(self._network_tx_seen.values())) > 300
+                ):
                     self._network_tx_seen.popitem(last=False)
                 claim = (self.topology.network(rid), packet.calculate_packet_hash().hex())
-                if claim in self._network_tx_seen and not (group and group.claimed and group.claim == claim):
+                if claim in self._network_tx_seen and not (
+                    group and group.claimed and group.claim == claim
+                ):
                     self.network_tx_duplicates += 1
                     if group:
                         group.inflight = False
                         group.aborted = True
-                    return {'ok': False, 'radio_id': rid, 'reason': 'destination duplicate',
-                            'suppressed': True, 'retryable': False, 'preserve_tx_claim': True,
-                            'tx_outcome_uncertain': False, 'airtime_ms': 0.0}
+                    return {
+                        "ok": False,
+                        "radio_id": rid,
+                        "reason": "destination duplicate",
+                        "suppressed": True,
+                        "retryable": False,
+                        "preserve_tx_claim": True,
+                        "tx_outcome_uncertain": False,
+                        "airtime_ms": 0.0,
+                    }
                 if claim not in self._network_tx_seen and len(self._network_tx_seen) >= 10000:
                     self.network_tx_capacity_drops += 1
                     if group:
                         group.inflight = False
                         group.aborted = True
-                    return {'ok': False, 'radio_id': rid, 'reason': 'destination cache full',
-                            'retryable': False, 'tx_outcome_uncertain': False, 'airtime_ms': 0.0}
+                    return {
+                        "ok": False,
+                        "radio_id": rid,
+                        "reason": "destination cache full",
+                        "retryable": False,
+                        "tx_outcome_uncertain": False,
+                        "airtime_ms": 0.0,
+                    }
                 # Claim synchronously before any await, including concurrent sends.
                 self._network_tx_seen[claim] = now
                 if group:
@@ -523,9 +563,12 @@ class RFFabric:
                     group.claimed = True
         if self.comparison:
             from ..protocol.packet import Packet
+
             packet = Packet()
             packet.read_from(data)
-            network = self.comparison.start_tx(rid, hashlib.sha256(data).digest(), packet.calculate_packet_hash().hex())
+            network = self.comparison.start_tx(
+                rid, hashlib.sha256(data).digest(), packet.calculate_packet_hash().hex()
+            )
         result = None
         send_exception = False
         try:
@@ -534,19 +577,36 @@ class RFFabric:
             send_exception = True
             raise
         finally:
-            failed = result is False or (isinstance(result, dict) and result.get('ok') is False
-                                         and not result.get('tx_outcome_uncertain'))
+            failed = result is False or (
+                isinstance(result, dict)
+                and result.get("ok") is False
+                and not result.get("tx_outcome_uncertain")
+            )
             if group:
                 group.finish(rid, result, send_exception)
             if failed and claim is not None and group is None:
                 self._network_tx_seen.pop(claim, None)
             if network is not None:
                 self.comparison.end_tx(
-                    network, hashlib.sha256(data).digest(), failed=failed,
-                    outcome=("exception" if send_exception else
-                             "uncertain" if isinstance(result, dict) and result.get("tx_outcome_uncertain") else
-                             "confirmed" if result is True or isinstance(result, dict) and result.get("ok") is True else
-                             "not_confirmed"))
+                    network,
+                    hashlib.sha256(data).digest(),
+                    failed=failed,
+                    outcome=(
+                        "exception"
+                        if send_exception
+                        else (
+                            "uncertain"
+                            if isinstance(result, dict) and result.get("tx_outcome_uncertain")
+                            else (
+                                "confirmed"
+                                if result is True
+                                or isinstance(result, dict)
+                                and result.get("ok") is True
+                                else "not_confirmed"
+                            )
+                        )
+                    ),
+                )
         if isinstance(result, dict):
             # Do not overwrite if the radio already stamped a more specific id.
             result.setdefault("radio_id", rid)

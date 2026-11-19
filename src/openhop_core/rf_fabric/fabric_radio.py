@@ -107,7 +107,9 @@ class FabricRadio(LoRaRadio):
         rx_radio_id: Optional[str] = None,
         reply_to_radio_id: Optional[str] = None,
     ) -> Any:
-        return await self.fabric.send(data, radio_id=radio_id, rx_radio_id=rx_radio_id, reply_to_radio_id=reply_to_radio_id)
+        return await self.fabric.send(
+            data, radio_id=radio_id, rx_radio_id=rx_radio_id, reply_to_radio_id=reply_to_radio_id
+        )
 
     def resolve_tx_radio_id(
         self,
@@ -122,7 +124,9 @@ class FabricRadio(LoRaRadio):
         Named here rather than left to ``__getattr__`` so callers can check for
         the keyword on the adapter they hold.
         """
-        return self.fabric.resolve_tx_radio_id(data, radio_id, rx_radio_id=rx_radio_id, reply_to_radio_id=reply_to_radio_id)
+        return self.fabric.resolve_tx_radio_id(
+            data, radio_id, rx_radio_id=rx_radio_id, reply_to_radio_id=reply_to_radio_id
+        )
 
     async def wait_for_rx(self) -> bytes:
         radio = self.fabric.radio
@@ -168,12 +172,14 @@ class FabricRadio(LoRaRadio):
         data: bytes,
         rssi: Optional[int] = None,
         snr: Optional[float] = None,
-        *, rx_radio_id: Optional[str] = None,
+        *,
+        rx_radio_id: Optional[str] = None,
     ) -> None:
         cb = self.rx_callback
         if cb is None:
             return
         from .fabric import _selector_takes_rx
+
         if _selector_takes_rx(cb):
             cb(data, rssi, snr, rx_radio_id=rx_radio_id)
         else:

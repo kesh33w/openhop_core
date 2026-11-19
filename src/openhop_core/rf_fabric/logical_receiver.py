@@ -8,18 +8,18 @@ path variants and receiver forwarding permissions cannot be discarded here.
 
 from __future__ import annotations
 
-from collections import Counter, OrderedDict
-from dataclasses import dataclass, field
 import hashlib
 import inspect
-from threading import RLock
 import time
+import uuid
+from collections import Counter, OrderedDict
+from dataclasses import dataclass, field
+from threading import RLock
 from types import MappingProxyType
 from typing import Callable
-import uuid
 
-from ..protocol.packet import Packet
 from ..protocol.constants import MAX_PATH_SIZE
+from ..protocol.packet import Packet
 
 
 @dataclass(frozen=True)
@@ -206,8 +206,7 @@ class LogicalReceiver:
             now, wall = self.clock(), self.wall_clock()
             while (
                 self._entries
-                and now - next(iter(self._entries.values())).first.monotonic_at
-                >= self.ttl
+                and now - next(iter(self._entries.values())).first.monotonic_at >= self.ttl
             ):
                 self._entries.popitem(last=False)
                 self._counts["expired"] += 1
@@ -232,11 +231,7 @@ class LogicalReceiver:
                 self._counts["unique_events"] += 1
             else:
                 entry.count += 1
-                kind = (
-                    "copy"
-                    if observation.wire_hash == entry.first.wire_hash
-                    else "variant"
-                )
+                kind = "copy" if observation.wire_hash == entry.first.wire_hash else "variant"
                 self._counts[kind + "_observations"] += 1
                 if len(entry.observations) < self.history_capacity:
                     entry.observations.append(observation)

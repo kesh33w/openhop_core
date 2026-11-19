@@ -3,9 +3,10 @@
 No radio writes. Checkpoints run in the actual reader after parsing the current
 buffer, never directly from the event loop that requests a fence.
 """
+
 import asyncio
-from collections import deque
 import threading
+from collections import deque
 
 
 class RxReceiptFence:
@@ -28,7 +29,7 @@ class RxReceiptFence:
         future = loop.create_future()
         with self._lock:
             if len(self._waiting) >= 16:
-                raise RuntimeError('Reader fence queue full')
+                raise RuntimeError("Reader fence queue full")
             self._waiting.append((loop, future, self._generation))
         try:
             return await asyncio.wait_for(future, 1.5)
@@ -43,13 +44,15 @@ class RxReceiptFence:
         with self._lock:
             waiting, self._waiting = self._waiting, deque()
         for loop, future, generation in waiting:
+
             def finish(future=future, generation=generation):
                 if future.done():
                     return
                 if self.generation != generation:
-                    future.set_exception(RuntimeError('Reader continuity changed'))
+                    future.set_exception(RuntimeError("Reader continuity changed"))
                 else:
                     future.set_result(generation)
+
             try:
                 loop.call_soon_threadsafe(finish)
             except RuntimeError:

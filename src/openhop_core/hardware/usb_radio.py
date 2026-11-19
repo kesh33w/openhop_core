@@ -32,8 +32,6 @@ import asyncio
 import inspect
 import logging
 import os
-from .rx_receipts import RxReceiptFence
-
 import queue
 import random
 import struct
@@ -45,7 +43,6 @@ import serial
 from serial.tools import list_ports
 
 from .cad_control import CadControlMixin
-
 from .protocol_constants import (
     CMD_CAD_PARAMS_RESP,
     CMD_CAD_REQUEST,
@@ -86,6 +83,7 @@ from .protocol_constants import (
     build_frame,
     crc16_ccitt,
 )
+from .rx_receipts import RxReceiptFence
 
 logger = logging.getLogger("USBLoRaRadio")
 
@@ -1273,8 +1271,13 @@ class USBLoRaRadio(CadControlMixin, _RadioBase):
 
     @property
     def rx_receipt_available(self):
-        return bool(self._initialized and self._connected_event.is_set() and not self._stop_event.is_set()
-                    and self._rx_thread and self._rx_thread.is_alive())
+        return bool(
+            self._initialized
+            and self._connected_event.is_set()
+            and not self._stop_event.is_set()
+            and self._rx_thread
+            and self._rx_thread.is_alive()
+        )
 
     @property
     def rx_receipt_generation(self):

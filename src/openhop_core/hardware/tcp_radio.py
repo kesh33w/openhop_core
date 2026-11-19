@@ -33,8 +33,6 @@ Usage:
 import asyncio
 import logging
 import random
-from .rx_receipts import RxReceiptFence
-
 import socket
 import struct
 import threading
@@ -42,7 +40,6 @@ import time
 from typing import Callable, Optional
 
 from .cad_control import CadControlMixin
-
 from .protocol_constants import (
     CMD_AUTH,
     CMD_AUTH_OK,
@@ -76,6 +73,7 @@ from .protocol_constants import (
     build_frame,
     crc16_ccitt,
 )
+from .rx_receipts import RxReceiptFence
 
 logger = logging.getLogger("TCPLoRaRadio")
 
@@ -896,8 +894,13 @@ class TCPLoRaRadio(CadControlMixin, _RadioBase):
 
     @property
     def rx_receipt_available(self):
-        return bool(self._initialized and self._sock is not None and not self._stop_event.is_set()
-                    and self._rx_thread and self._rx_thread.is_alive())
+        return bool(
+            self._initialized
+            and self._sock is not None
+            and not self._stop_event.is_set()
+            and self._rx_thread
+            and self._rx_thread.is_alive()
+        )
 
     @property
     def rx_receipt_generation(self):
@@ -1048,7 +1051,9 @@ class TCPLoRaRadio(CadControlMixin, _RadioBase):
                         pass
 
                 if self._event_loop and self._event_loop.is_running():
-                    self._event_loop.call_soon_threadsafe(self._deliver_rx_receipt, self.rx_callback, lora_data)
+                    self._event_loop.call_soon_threadsafe(
+                        self._deliver_rx_receipt, self.rx_callback, lora_data
+                    )
                 else:
                     self._rx_receipts.invalidate()
                     try:

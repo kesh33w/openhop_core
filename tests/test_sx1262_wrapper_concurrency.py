@@ -3010,7 +3010,12 @@ class TestCoverageSecondPass:
         radio._last_irq_status = IRQ_RX_DONE
         with caplog.at_level(logging.WARNING, logger="SX1262_wrapper"):
             radio._rx_done_event.set()
-            await asyncio.sleep(0.05)
+            # Poll instead of a fixed sleep: slow CI runners (seen on Python 3.10)
+            # can take longer than 50 ms to schedule the background task.
+            for _ in range(200):
+                if any("No RX callback registered" in r.getMessage() for r in caplog.records):
+                    break
+                await asyncio.sleep(0.01)
         radio._initialized = False
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):

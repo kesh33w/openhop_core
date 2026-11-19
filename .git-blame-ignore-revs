@@ -1,0 +1,3 @@
+# Mechanical formatting; skip in git blame (git config blame.ignoreRevsFile .git-blame-ignore-revs)
+# Apply upstream black, isort and flake8 rules to fork code
+03252df258aa760d26d7598fed7abe7078fd76d2

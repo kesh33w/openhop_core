@@ -4,6 +4,7 @@ Leaving the option unset preserves existing host and firmware behavior. An
 explicit mode is replayed on reconnect before the radio becomes ready. No RF
 packet is sent by this control command.
 """
+
 import logging
 
 log = logging.getLogger(__name__)

@@ -2,6 +2,9 @@ name: PR Checks
 
 on:
   pull_request:
+  # Fork main line: run the same gate on every push, not only on PRs.
+  push:
+    branches: [kesh/bridge]
   workflow_dispatch:
 
 concurrency:

@@ -4,9 +4,9 @@ No hardware calls live here. A shadow reception never enters the dispatcher.
 Network names are opaque identifiers, not inferred from radio order or frequency.
 """
 
+import time
 from collections import Counter, OrderedDict
 from threading import RLock
-import time
 
 
 class NetworkTopology:
@@ -20,9 +20,7 @@ class NetworkTopology:
             raise ValueError("Invalid fabric.topology fields")
         self.networks = settings.get("networks")
         if not isinstance(self.networks, dict) or len(self.networks) != 2:
-            raise ValueError(
-                "topology requires exactly two named networks with TX radio IDs"
-            )
+            raise ValueError("topology requires exactly two named networks with TX radio IDs")
         if any(
             not isinstance(n, str) or not n.strip() or not isinstance(r, str)
             for n, r in self.networks.items()
@@ -34,9 +32,7 @@ class NetworkTopology:
             rid = entry.get("id") or entry.get("radio_id")
             network, role = entry.get("network"), entry.get("role")
             if not rid or rid in self.members or network not in self.networks:
-                raise ValueError(
-                    "Every topology radio needs a unique ID and known network"
-                )
+                raise ValueError("Every topology radio needs a unique ID and known network")
             if role not in ("transceiver", "shadow", "receiver"):
                 raise ValueError("Every topology radio needs an explicit role")
             self.members[rid] = (network, role)
@@ -50,9 +46,13 @@ class NetworkTopology:
         for primary, targets in groups.items():
             if primary not in self.networks.values():
                 raise ValueError("TX group must name a logical network primary")
-            if (not isinstance(targets, (list, tuple)) or not targets
-                    or any(not isinstance(rid, str) for rid in targets)
-                    or len(set(targets)) != len(targets) or primary not in targets):
+            if (
+                not isinstance(targets, (list, tuple))
+                or not targets
+                or any(not isinstance(rid, str) for rid in targets)
+                or len(set(targets)) != len(targets)
+                or primary not in targets
+            ):
                 raise ValueError("TX group must contain unique radio IDs including its primary")
             network = self.members[primary][0]
             if any(rid not in self.members or self.members[rid][0] != network for rid in targets):
@@ -61,7 +61,9 @@ class NetworkTopology:
         permitted = set(self.networks.values())
         for targets in self.tx_groups.values():
             permitted.update(targets)
-        if not {r for r, (_, role) in self.members.items() if role == "transceiver"}.issubset(permitted):
+        if not {r for r, (_, role) in self.members.items() if role == "transceiver"}.issubset(
+            permitted
+        ):
             raise ValueError("Extra transceivers require an explicit TX group")
         if default_radio not in self.networks.values():
             raise ValueError("Default radio must be a designated network transmitter")
@@ -71,19 +73,15 @@ class NetworkTopology:
         for key in ("enable_receiver_forwarding", "repeat_receiver_on_network"):
             if type(settings.get(key, False)) is not bool:
                 raise ValueError(f"{key} must be a boolean")
-        if any(
-            role == "receiver" for _, role in self.members.values()
-        ) and not settings.get("enable_receiver_forwarding", False):
+        if any(role == "receiver" for _, role in self.members.values()) and not settings.get(
+            "enable_receiver_forwarding", False
+        ):
             raise ValueError(
                 "Receiver forwarding requires explicit enable_receiver_forwarding after comparison"
             )
         self.repeat_receiver = settings.get("repeat_receiver_on_network", False)
-        if self.repeat_receiver and not settings.get(
-            "enable_receiver_forwarding", False
-        ):
-            raise ValueError(
-                "Same-network receiver repetition requires receiver forwarding"
-            )
+        if self.repeat_receiver and not settings.get("enable_receiver_forwarding", False):
+            raise ValueError("Same-network receiver repetition requires receiver forwarding")
 
     def network(self, rid):
         if rid not in self.members:
@@ -145,9 +143,7 @@ class NetworkTopology:
             raise ValueError("TX is forbidden on a receive-only radio")
         if reply_to_radio_id is not None:
             # A newly generated local reply is distinct from retransmission.
-            if ingress is not None or target != self.reply_destination(
-                reply_to_radio_id
-            ):
+            if ingress is not None or target != self.reply_destination(reply_to_radio_id):
                 raise ValueError("A local reply must return on its request's network")
         elif ingress is not None and target not in self.destinations(ingress):
             raise ValueError("TX destination is forbidden for this ingress")
@@ -175,6 +171,7 @@ class ReceptionComparison:
         self.counters = Counter()
         self.lock = RLock()
         from .capture import ReceptionCapture
+
         self.capture = ReceptionCapture.from_environment()
 
     def _expire(self, rows, now):
@@ -195,13 +192,19 @@ class ReceptionComparison:
                 self.counters[("tx_overlap", rid)] += 1
             key = (network, identity)
             sent = self.tx.get((network, frame))
-            own = bool(sent is not None and (
-                self.inflight_frames[(network, frame)] or now - sent[0] <= 2
-            ))
+            own = bool(
+                sent is not None and (self.inflight_frames[(network, frame)] or now - sent[0] <= 2)
+            )
             if self.capture:
-                self.capture.emit("rx", network, radio_id=rid, packet_hash=identity,
-                                  frame_hash=frame.hex() if frame else None,
-                                  own_tx_match=own, tx_overlap=bool(self.inflight[network]))
+                self.capture.emit(
+                    "rx",
+                    network,
+                    radio_id=rid,
+                    packet_hash=identity,
+                    frame_hash=frame.hex() if frame else None,
+                    own_tx_match=own,
+                    tx_overlap=bool(self.inflight[network]),
+                )
             if own:
                 self.counters[("own_tx_match", rid)] += 1
                 return True
@@ -221,13 +224,25 @@ class ReceptionComparison:
             self.tx[key] = (self.clock(), None)
             self._expire(self.tx, self.clock())
             if self.capture:
-                self.capture.emit("tx_start", network, radio_id=rid, frame_hash=identity.hex(), packet_hash=payload_identity)
+                self.capture.emit(
+                    "tx_start",
+                    network,
+                    radio_id=rid,
+                    frame_hash=identity.hex(),
+                    packet_hash=payload_identity,
+                )
             return network
 
     def end_tx(self, network, frame=None, failed=False, outcome="unknown"):
         with self.lock:
             if self.capture:
-                self.capture.emit("tx_end", network, frame_hash=frame.hex() if frame else None, failed=failed, outcome=outcome)
+                self.capture.emit(
+                    "tx_end",
+                    network,
+                    frame_hash=frame.hex() if frame else None,
+                    failed=failed,
+                    outcome=outcome,
+                )
             self.inflight[network] -= 1
             key = (network, frame)
             self.inflight_frames[key] -= 1
@@ -246,9 +261,7 @@ class ReceptionComparison:
             self._expire(self.rows, self.clock())
             receivers = {}
             for rid, (network, role) in self.topology.members.items():
-                sets = [
-                    ears for (net, _), (_, ears) in self.rows.items() if net == network
-                ]
+                sets = [ears for (net, _), (_, ears) in self.rows.items() if net == network]
                 receivers[rid] = {
                     "network": network,
                     "role": role,
@@ -266,7 +279,6 @@ class ReceptionComparison:
                 "capacity_evictions": self.counters["capacity_evictions"],
                 "receivers": receivers,
                 "networks": {
-                    n: sum(net == n for net, _ in self.rows)
-                    for n in self.topology.networks
+                    n: sum(net == n for net, _ in self.rows) for n in self.topology.networks
                 },
             }
