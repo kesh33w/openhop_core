@@ -11,6 +11,10 @@ from threading import RLock
 # Which sends a TX group applies to.
 TX_GROUP_SCOPES = ("all", "crossings")
 
+# Upper bound for the pause between a TX group's legs, in milliseconds. Longer
+# pauses only delay the second copy past any use and hold the group open.
+MAX_TX_GROUP_GAP_MS = 10000
+
 
 class NetworkTopology:
     def __init__(self, entries, settings, default_radio):
@@ -20,6 +24,7 @@ class NetworkTopology:
             "repeat_receiver_on_network",
             "tx_groups",
             "tx_group_scopes",
+            "tx_group_gaps_ms",
         }:
             raise ValueError("Invalid fabric.topology fields")
         self.networks = settings.get("networks")
@@ -61,6 +66,8 @@ class NetworkTopology:
             network = self.members[primary][0]
             if any(rid not in self.members or self.members[rid][0] != network for rid in targets):
                 raise ValueError("TX group members must belong to the same network")
+            if any(self.members[rid][1] == "shadow" for rid in targets):
+                raise ValueError("Shadow radios are receive-only and cannot be in a TX group")
             self.tx_groups[primary] = tuple(targets)
         scopes = settings.get("tx_group_scopes", {})
         if not isinstance(scopes, dict):
@@ -72,6 +79,24 @@ class NetworkTopology:
             if scope not in TX_GROUP_SCOPES:
                 raise ValueError("TX group scope must be 'all' or 'crossings'")
             self.tx_group_scopes[primary] = scope
+        gaps = settings.get("tx_group_gaps_ms", {})
+        if not isinstance(gaps, dict):
+            raise ValueError("tx_group_gaps_ms must map TX group primaries to [min, max]")
+        self.tx_group_gaps_ms = {}
+        for primary, gap in gaps.items():
+            if len(self.tx_groups.get(primary, ())) < 2:
+                raise ValueError("tx_group_gaps_ms may only name a TX group of two or more radios")
+            if (
+                not isinstance(gap, (list, tuple))
+                or len(gap) != 2
+                or any(type(v) not in (int, float) for v in gap)
+                or not 0 <= gap[0] <= gap[1] <= MAX_TX_GROUP_GAP_MS
+            ):
+                raise ValueError(
+                    f"TX group gap must be [min, max] ms with 0 <= min <= max <= "
+                    f"{MAX_TX_GROUP_GAP_MS}"
+                )
+            self.tx_group_gaps_ms[primary] = (float(gap[0]), float(gap[1]))
         permitted = set(self.networks.values())
         for targets in self.tx_groups.values():
             permitted.update(targets)
@@ -152,6 +177,15 @@ class NetworkTopology:
         """``all`` (every send uses the group) or ``crossings`` (bridged sends only)."""
         return self.tx_group_scopes.get(logical_primary, "all")
 
+    def tx_group_gap_ms(self, logical_primary):
+        """``(min, max)`` pause in ms before each leg after the first; (0, 0) by default.
+
+        The sender picks a random value in the range for each pause so the extra
+        copy does not land at a fixed offset behind the first one, where it would
+        collide with neighbours rebroadcasting that first copy.
+        """
+        return self.tx_group_gaps_ms.get(logical_primary, (0.0, 0.0))
+
     def tx_targets_for(self, logical_primary, *, crossing=False):
         """Physical egresses for one send.
 
@@ -167,6 +201,9 @@ class NetworkTopology:
         if group_primary is not None:
             if target not in self.tx_targets(group_primary):
                 raise ValueError("Physical target is not a member of the active TX group")
+            # Startup rejects this too; checked again so a shadow can never key up.
+            if self.members.get(target, (None, None))[1] == "shadow":
+                raise ValueError("TX is forbidden on a shadow radio")
             target = group_primary
         if target not in self.networks.values():
             raise ValueError("TX is forbidden on a receive-only radio")
