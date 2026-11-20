@@ -4,6 +4,8 @@ Fork-specific changes to OpenHop Core. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+## [1.3.3] - 2026-11-20
+
 ### Added
 
 - **TX group gaps.** `tx_group_gaps_ms` maps a TX group primary to a `[min, max]` pause in milliseconds (0–10000) before each leg after the first; `NetworkTopology.tx_group_gap_ms()` returns it, `(0, 0)` by default. Only valid for groups of two or more radios.
@@ -11,6 +13,12 @@ Fork-specific changes to OpenHop Core. The format follows [Keep a Changelog](htt
 ### Fixed
 
 - **Shadow radios could join a TX group.** Shadow radios are receive-only; a TX group containing one is now rejected when the topology loads, and `check_tx` refuses a shadow leg as a second guard.
+
+## [1.3.2] - 2026-11-20
+
+### Changed
+
+- No changes. Tagged so all four repositories share the HydraHop version.
 
 ## [1.3.1] - 2026-11-20
 
