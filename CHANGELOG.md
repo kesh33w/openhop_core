@@ -4,6 +4,10 @@ Fork-specific changes to OpenHop Core. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Added
+
+- **Random TX group order.** `tx_group_orders` maps a TX group primary to `fixed` (configured order, the default) or `random` (order shuffled for every send); `NetworkTopology.tx_group_order()` returns it. Only valid for groups of two or more radios.
+
 ## [1.3.3] - 2026-11-20
 
 ### Added
