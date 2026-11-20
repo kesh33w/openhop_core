@@ -72,3 +72,22 @@ def test_shadow_cannot_transmit_even_if_listed_after_startup():
     t.tx_groups["bay"] = ("bay", "v3910")
     with pytest.raises(ValueError, match="shadow"):
         t.check_tx("v3910", group_primary="bay")
+
+
+def test_order_defaults_to_fixed_and_accepts_random():
+    assert topology().tx_group_order("bay") == "fixed"
+    assert topology(tx_group_orders={"bay": "random"}).tx_group_order("bay") == "random"
+
+
+@pytest.mark.parametrize(
+    "orders", [{"bay": "shuffle"}, {"host-rf": "random"}, ["bay"]]
+)
+def test_invalid_orders_are_rejected(orders):
+    with pytest.raises(ValueError):
+        topology(tx_group_orders=orders)
+
+
+def test_either_member_may_send_first():
+    t = topology(tx_group_orders={"bay": "random"})
+    t.check_tx("rak910", group_primary="bay")
+    t.check_tx("bay", group_primary="bay")

@@ -15,6 +15,9 @@ TX_GROUP_SCOPES = ("all", "crossings")
 # pauses only delay the second copy past any use and hold the group open.
 MAX_TX_GROUP_GAP_MS = 10000
 
+# Leg order of a TX group: as configured, or shuffled for every send.
+TX_GROUP_ORDERS = ("fixed", "random")
+
 
 class NetworkTopology:
     def __init__(self, entries, settings, default_radio):
@@ -25,6 +28,7 @@ class NetworkTopology:
             "tx_groups",
             "tx_group_scopes",
             "tx_group_gaps_ms",
+            "tx_group_orders",
         }:
             raise ValueError("Invalid fabric.topology fields")
         self.networks = settings.get("networks")
@@ -97,6 +101,16 @@ class NetworkTopology:
                     f"{MAX_TX_GROUP_GAP_MS}"
                 )
             self.tx_group_gaps_ms[primary] = (float(gap[0]), float(gap[1]))
+        orders = settings.get("tx_group_orders", {})
+        if not isinstance(orders, dict):
+            raise ValueError("tx_group_orders must map TX group primaries to fixed or random")
+        self.tx_group_orders = {}
+        for primary, order in orders.items():
+            if len(self.tx_groups.get(primary, ())) < 2:
+                raise ValueError("tx_group_orders may only name a TX group of two or more radios")
+            if order not in TX_GROUP_ORDERS:
+                raise ValueError("TX group order must be 'fixed' or 'random'")
+            self.tx_group_orders[primary] = order
         permitted = set(self.networks.values())
         for targets in self.tx_groups.values():
             permitted.update(targets)
@@ -185,6 +199,14 @@ class NetworkTopology:
         collide with neighbours rebroadcasting that first copy.
         """
         return self.tx_group_gaps_ms.get(logical_primary, (0.0, 0.0))
+
+    def tx_group_order(self, logical_primary):
+        """``fixed`` (configured order, the default) or ``random`` (shuffled per send).
+
+        Random order lets each radio go first about half the time, so which copy
+        neighbours relay can be compared fairly between the radios.
+        """
+        return self.tx_group_orders.get(logical_primary, "fixed")
 
     def tx_targets_for(self, logical_primary, *, crossing=False):
         """Physical egresses for one send.
