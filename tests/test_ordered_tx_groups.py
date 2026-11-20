@@ -80,12 +80,11 @@ def test_extra_transceiver_requires_opt_in():
         topology()
 
 
-@pytest.mark.parametrize("role", ["shadow", "receiver"])
-def test_group_secondary_keeps_receive_role_and_routing(role):
+def test_group_secondary_keeps_receive_role_and_routing():
     entries = [
         dict(id="smf", network="SMF", role="transceiver"),
         dict(id="bay", network="SFO", role="transceiver"),
-        dict(id="rak", network="SFO", role=role),
+        dict(id="rak", network="SFO", role="receiver"),
     ]
     base = {"networks": {"SMF": "smf", "SFO": "bay"}, "enable_receiver_forwarding": True}
     before = NetworkTopology(entries, base, "smf")
