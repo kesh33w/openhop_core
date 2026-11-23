@@ -135,7 +135,19 @@ This is the first tagged fork release. It covers everything since the fork's ups
 - **USB command lock**: it could leak on Python 3.10/3.11 when a waiting command was cancelled.
 - **Reception capture**: reconfiguring the topology leaked the previous capture thread, and refreshed TX entries stalled expiry.
 
-[Unreleased]: https://github.com/kesh33w/openhop_core/compare/kesh-2026.11.18.2...kesh/bridge
+[Unreleased]: https://github.com/kesh33w/openhop_core/compare/hydrahop-v1.4.0...kesh/bridge
+[1.4.0]: https://github.com/kesh33w/openhop_core/compare/hydrahop-v1.3.3...hydrahop-v1.4.0
+[1.3.3]: https://github.com/kesh33w/openhop_core/compare/hydrahop-v1.3.2...hydrahop-v1.3.3
+[1.3.2]: https://github.com/kesh33w/openhop_core/compare/hydrahop-v1.3.1...hydrahop-v1.3.2
+[1.3.1]: https://github.com/kesh33w/openhop_core/compare/hydrahop-v1.3.0...hydrahop-v1.3.1
+[1.3.0]: https://github.com/kesh33w/openhop_core/compare/hydrahop-v1.2.0...hydrahop-v1.3.0
+[1.2.0]: https://github.com/kesh33w/openhop_core/compare/hydrahop-v1.1.0...hydrahop-v1.2.0
+[1.1.0]: https://github.com/kesh33w/openhop_core/compare/hydrahop-v1.0.3...hydrahop-v1.1.0
+[1.0.3]: https://github.com/kesh33w/openhop_core/compare/hydrahop-v1.0.2...hydrahop-v1.0.3
+[1.0.2]: https://github.com/kesh33w/openhop_core/compare/hydrahop-v1.0.1...hydrahop-v1.0.2
+[1.0.1]: https://github.com/kesh33w/openhop_core/compare/hydrahop-v1.0.0...hydrahop-v1.0.1
+[1.0.0]: https://github.com/kesh33w/openhop_core/compare/kesh-2026.11.19...hydrahop-v1.0.0
+[kesh-2026.11.19]: https://github.com/kesh33w/openhop_core/compare/kesh-2026.11.18.2...kesh-2026.11.19
 [kesh-2026.11.18.2]: https://github.com/kesh33w/openhop_core/compare/kesh-2026.11.18.1...kesh-2026.11.18.2
 [kesh-2026.11.18.1]: https://github.com/kesh33w/openhop_core/compare/kesh-2026.11.18...kesh-2026.11.18.1
 [kesh-2026.11.18]: https://github.com/kesh33w/openhop_core/compare/141d944...kesh-2026.11.18
