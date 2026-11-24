@@ -4,6 +4,19 @@ Fork-specific changes to OpenHop Core. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-11-24
+
+### Added
+
+- **Upstream OpenHop core dev merged (7 Nov 2026).** Brings AGC reset, FEM gain and RX-boost control for openHop Modem USB/TCP radios over the frame protocol (`FrameRfControls`; needs openhop_modem v1.4.2 or later, older firmware answers "unsupported"), companion send hashes, KISS modem hang fixes and the destination-key fix.
+
+### Fixed
+
+- **Saved RF front-end settings apply at startup.** Upstream's restore was refused when `begin()` ran on the event-loop thread, so settings only took effect after a reconnect.
+- **An RF frame that never left the host no longer blocks TX.** It used to quarantine a reply that could not come, holding transmits for up to 24 s.
+- **USB reconnect skips a stale modem error** buffered from the old session before `CONFIG_RESP`, instead of failing the attempt.
+- **TCP commands fail fast while the socket is down** instead of holding the command lock through the reconnect backoff.
+
 ## [1.4.0] - 2026-11-20
 
 ### Added
@@ -135,7 +148,8 @@ This is the first tagged fork release. It covers everything since the fork's ups
 - **USB command lock**: it could leak on Python 3.10/3.11 when a waiting command was cancelled.
 - **Reception capture**: reconfiguring the topology leaked the previous capture thread, and refreshed TX entries stalled expiry.
 
-[Unreleased]: https://github.com/kesh33w/openhop_core/compare/hydrahop-v1.4.0...kesh/bridge
+[Unreleased]: https://github.com/kesh33w/openhop_core/compare/hydrahop-v1.7.0...kesh/bridge
+[1.7.0]: https://github.com/kesh33w/openhop_core/compare/hydrahop-v1.6.1...hydrahop-v1.7.0
 [1.4.0]: https://github.com/kesh33w/openhop_core/compare/hydrahop-v1.3.3...hydrahop-v1.4.0
 [1.3.3]: https://github.com/kesh33w/openhop_core/compare/hydrahop-v1.3.2...hydrahop-v1.3.3
 [1.3.2]: https://github.com/kesh33w/openhop_core/compare/hydrahop-v1.3.1...hydrahop-v1.3.2
