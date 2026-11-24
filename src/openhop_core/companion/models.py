@@ -199,13 +199,23 @@ class NodePrefs:
 
 @dataclass
 class SentResult:
-    """Result of a message send operation."""
+    """Result of a message send operation.
+
+    Truthy when the send succeeded, so a caller that tests the result of
+    ``send_channel_message`` keeps reading it as the bool it used to be.
+    ``packet_hash`` is the sent packet's, as the dispatcher and a repeater's
+    packet log key it.
+    """
 
     success: bool
     is_flood: bool = False
     expected_ack: Optional[int] = None
     timeout_ms: Optional[int] = None
     error: Optional[str] = None
+    packet_hash: Optional[bytes] = None
+
+    def __bool__(self) -> bool:
+        return self.success
 
 
 @dataclass
@@ -313,3 +323,24 @@ class ChannelDataEvent:
     # persistence layer can remove that entry by identity instead of guessing.
     # None when the protected queue rejected the push.
     queue_entry: Optional[QueuedMessage] = None
+
+
+@dataclass(frozen=True)
+class SentMessageEvent:
+    """A text message this companion is sending (single ``on_message_sent`` argument).
+
+    Fired once the packet is built, before the transport is awaited, so a send
+    that then fails to go out is reported too. A direct message has
+    ``recipient_key`` and the ``expected_ack`` that ``send_confirmed`` reports; a
+    channel message has ``channel_idx``. CLI commands, which earn no ACK, are not
+    reported. ``packet_hash`` is the sent packet's, as the dispatcher and a
+    repeater's packet log key it.
+    """
+
+    text: str
+    timestamp: int
+    txt_type: int = 0
+    recipient_key: Optional[bytes] = None
+    channel_idx: Optional[int] = None
+    expected_ack: Optional[int] = None
+    packet_hash: Optional[bytes] = None
