@@ -1148,6 +1148,8 @@ class TCPLoRaRadio(CadControlMixin, _RadioBase, FrameRfControls):
         # Whether the frame never reached the socket: "never sent" vs "unknown".
         self._last_command_unsent = True
         deadline = time.monotonic() + timeout
+        if self._sock is None:
+            return None
         async with self._command_lock:
             self._last_command_unsent = True
             remaining = deadline - time.monotonic()

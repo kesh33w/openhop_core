@@ -1004,31 +1004,26 @@ def test_usb_reopen_status_detects_reboot_before_rf_restore(
 
 
 @pytest.mark.asyncio
-# HydraHop's USB driver refuses a command while disconnected, so the fabric
-# can report it as not sent and use another radio, instead of holding it.
-@pytest.mark.parametrize("cls", [TCPLoRaRadio])
-async def test_tx_waits_for_missing_transport_during_reconnect(cls):
+@pytest.mark.parametrize("cls", [TCPLoRaRadio, USBLoRaRadio])
+async def test_tx_fails_fast_while_transport_is_missing_during_reconnect(cls):
+    # HydraHop: a command with no link is refused at once ("not sent"), so the
+    # fabric can report it and use another radio instead of holding the lock.
     radio = _live_radio(cls)
     radio._rf_reconnecting = True
     if cls is TCPLoRaRadio:
         radio._sock = None
     else:
         radio._connected_event.clear()
-    tx = asyncio.create_task(radio._send_command(CMD_TX_REQUEST, b"data", CMD_TX_DONE, 0.2))
-    try:
-        await asyncio.sleep(0.02)
-        assert not tx.done()
-        writer = _tx_writer(radio)
-        if cls is TCPLoRaRadio:
-            radio._sock = Mock()
-        else:
-            radio._connected_event.set()
-        radio._rf_reconnecting = False
-        assert await tx == _u32(1000)
-        writer.assert_called_once()
-    finally:
-        tx.cancel()
-        await asyncio.gather(tx, return_exceptions=True)
+    writer = _tx_writer(radio)
+    if cls is TCPLoRaRadio:
+        radio._sock = None
+    else:
+        radio._connected_event.clear()
+    started = time.monotonic()
+    assert await radio._send_command(CMD_TX_REQUEST, b"data", CMD_TX_DONE, 0.5) is None
+    assert time.monotonic() - started < 0.1
+    writer.assert_not_called()
+    assert radio._last_command_unsent
 
 
 @pytest.mark.asyncio

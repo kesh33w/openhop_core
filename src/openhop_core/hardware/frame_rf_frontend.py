@@ -79,6 +79,10 @@ def _as_int(value) -> Optional[int]:
     return None
 
 
+class RfFrameNotSent(Exception):
+    """Raised by a driver's ``_rf_write_frame`` when no byte reached the modem."""
+
+
 class FrameRfControls:
     """Methods mixed into ``TCPLoRaRadio`` and ``USBLoRaRadio``."""
 
@@ -236,8 +240,13 @@ class FrameRfControls:
     ) -> Optional[tuple[int, bytes]]:
         try:
             if asyncio.get_running_loop():
-                logger.error("RF control was called on an event loop")
-                return None
+                # begin() runs the restore synchronously, possibly on the loop's
+                # thread, before any RX worker reads the link; that is safe.
+                if not (
+                    self._rf_restore_thread is threading.current_thread() and self._rf_use_sync()
+                ):
+                    logger.error("RF control was called on an event loop")
+                    return None
         except RuntimeError:
             pass
         with self._rf_lock:
@@ -310,6 +319,9 @@ class FrameRfControls:
         try:
             with self._rf_write_lock:
                 self._rf_write_frame(build_frame(cmd, payload))
+        except RfFrameNotSent as exc:
+            logger.warning("RF frame not sent: %s", exc)
+            return None
         except Exception as exc:
             with self._response_lock:
                 self._rf_quarantine(expect)
@@ -379,7 +391,13 @@ class FrameRfControls:
                                 # Partial writes can still produce a reply.
                                 sent = True
                                 self._rf_inflight_reply = expect
-                            self._rf_write_frame(build_frame(cmd, payload))
+                            try:
+                                self._rf_write_frame(build_frame(cmd, payload))
+                            except RfFrameNotSent:
+                                with self._response_lock:
+                                    sent = False
+                                    self._rf_inflight_reply = None
+                                raise
 
                     write_task = asyncio.create_task(asyncio.to_thread(write))
                     await asyncio.shield(write_task)

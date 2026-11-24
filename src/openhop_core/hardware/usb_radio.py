@@ -43,7 +43,7 @@ import serial
 from serial.tools import list_ports
 
 from .cad_control import CadControlMixin
-from .frame_rf_frontend import FrameRfControls
+from .frame_rf_frontend import FrameRfControls, RfFrameNotSent
 from .protocol_constants import (
     CMD_CAD_PARAMS_RESP,
     CMD_CAD_REQUEST,
@@ -1167,11 +1167,11 @@ class USBLoRaRadio(CadControlMixin, _RadioBase, FrameRfControls):
             self._serial.write(frame)
             return
         if not self._serial_io_lock.acquire(timeout=self._write_timeout):
-            raise serial.SerialException("serial writer busy; RF frame not sent")
+            raise RfFrameNotSent("serial writer busy")
         try:
             handle = self._serial
             if handle is None or not handle.is_open or not self._connected_event.is_set():
-                raise serial.SerialException("serial session retired before RF write")
+                raise RfFrameNotSent("serial session retired")
             written = handle.write(frame)
             if written is not None and written != len(frame):
                 raise serial.SerialException(f"short serial write: {written}/{len(frame)}")
@@ -1213,7 +1213,22 @@ class USBLoRaRadio(CadControlMixin, _RadioBase, FrameRfControls):
         # 10 s covers the worst case where a burst of RX_PACKET frames from
         # nearby MeshCore nodes arrives ahead of CONFIG_RESP and the filter
         # has to skip them.
-        resp = self._read_frame_sync(timeout=10.0, expect_cmd=CMD_CONFIG_RESP)
+        deadline = time.monotonic() + 10.0
+        while True:
+            resp = self._read_frame_sync(
+                timeout=max(0.01, deadline - time.monotonic()), expect_cmd=CMD_CONFIG_RESP
+            )
+            # On reconnect the input buffer is kept (late RF replies are drained),
+            # so an error from the old session can precede CONFIG_RESP.
+            if (
+                resp
+                and resp[0] == CMD_ERROR
+                and self._rf_reconnecting
+                and time.monotonic() < deadline
+            ):
+                logger.debug("Skipping modem error buffered before CONFIG_RESP")
+                continue
+            break
         if resp and resp[0] == CMD_CONFIG_RESP:
             logger.info(
                 f"Radio configured: {self.frequency / 1e6:.1f}MHz SF{self.spreading_factor} "
