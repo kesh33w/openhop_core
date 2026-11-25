@@ -1,4 +1,9 @@
-"""Explicit two-network routing and bounded receive-only comparison.
+"""Explicit multi-network routing and bounded receive-only comparison.
+
+A topology names two or more separate meshes, each with one designated TX
+radio. Traffic heard on one network may be sent on its own network and on
+every other network; which packets actually cross, and where, is decided by
+the caller (for example the repeater's channel-bridge mappings).
 
 No hardware calls live here. A shadow reception never enters the dispatcher.
 Network names are opaque identifiers, not inferred from radio order or frequency.
@@ -32,8 +37,8 @@ class NetworkTopology:
         }:
             raise ValueError("Invalid fabric.topology fields")
         self.networks = settings.get("networks")
-        if not isinstance(self.networks, dict) or len(self.networks) != 2:
-            raise ValueError("topology requires exactly two named networks with TX radio IDs")
+        if not isinstance(self.networks, dict) or len(self.networks) < 2:
+            raise ValueError("topology requires two or more named networks with TX radio IDs")
         if any(
             not isinstance(n, str) or not n.strip() or not isinstance(r, str)
             for n, r in self.networks.items()
@@ -157,12 +162,18 @@ class NetworkTopology:
         return self.networks[self.network(rid)]
 
     def destinations(self, rid):
+        """Permitted logical egresses for traffic heard on ``rid``.
+
+        Every other network's TX, in configured order, then the home TX when
+        same-network repeats are allowed. With two networks this is
+        ``(other, home)`` or ``(other,)``.
+        """
         if self.is_shadow(rid):
             return ()
         home = self.home(rid)
-        other = next(tx for tx in self.networks.values() if tx != home)
+        others = tuple(tx for tx in self.networks.values() if tx != home)
         same = self.members[rid][1] == "transceiver" or self.repeat_receiver
-        return (other, home) if same else (other,)
+        return (*others, home) if same else others
 
     def relay_destinations(self, rid):
         allowed = self.destinations(rid)
@@ -171,7 +182,9 @@ class NetworkTopology:
         if self.members[rid][1] == "receiver":
             return allowed
         if self.tx_mode == "bridge":
-            return allowed if self.repeat_on_ingress else allowed[:1]
+            if self.repeat_on_ingress:
+                return allowed
+            return tuple(tx for tx in allowed if tx != self.home(rid))
         if self.tx_mode == "sticky":
             return (self.home(rid),)
         return (self.default_radio,)
